@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const maxWGPeers = 100
+
 // Config holds the full parsed WireGuard configuration.
 type Config struct {
 	Interface InterfaceConfig
@@ -130,6 +132,10 @@ func ParseString(s string) (*Config, error) {
 		cfg.Peers = append(cfg.Peers, *currentPeer)
 	}
 
+	if len(cfg.Peers) > maxWGPeers {
+		return nil, fmt.Errorf("wg config: too many peers (%d, max %d)", len(cfg.Peers), maxWGPeers)
+	}
+
 	return cfg, nil
 }
 
@@ -140,9 +146,12 @@ func applyInterfaceKey(iface *InterfaceConfig, key, value string) error {
 	case "address":
 		iface.Address = value
 	case "listenport":
-		port, err := strconv.Atoi(value)
+		port, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return fmt.Errorf("invalid ListenPort %q: %w", value, err)
+			return fmt.Errorf("invalid ListenPort: %w", err)
+		}
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("ListenPort must be 1-65535, got %d", port)
 		}
 		iface.ListenPort = port
 	// Unknown keys (DNS, MTU, PostUp, etc.) are silently ignored.

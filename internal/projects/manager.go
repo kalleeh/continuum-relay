@@ -13,6 +13,7 @@ import (
 
 var slugRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$`)
 var nameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+var gitTokenRe = regexp.MustCompile(`https://[^@]+@`)
 
 type ProjectRecord struct {
 	Name string `json:"name"`
@@ -49,19 +50,23 @@ func SyncProject(slug, token string) error {
 		cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", authedURL, dest)
 		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git clone failed: %w\n%s", err, string(out))
+			os.RemoveAll(dest) // clean up partial clone
+			sanitized := gitTokenRe.ReplaceAll(out, []byte("https://"))
+			return fmt.Errorf("git clone failed: %w\n%s", err, sanitized)
 		}
 	} else {
 		// Re-set URL with token, pull, then strip token
 		setURL := exec.CommandContext(ctx, "git", "-C", dest, "remote", "set-url", "origin", authedURL)
 		setURL.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		if out, err := setURL.CombinedOutput(); err != nil {
-			return fmt.Errorf("remote set-url failed: %w\n%s", err, string(out))
+			sanitized := gitTokenRe.ReplaceAll(out, []byte("https://"))
+			return fmt.Errorf("remote set-url failed: %w\n%s", err, sanitized)
 		}
 		pull := exec.CommandContext(ctx, "git", "-C", dest, "pull", "--ff-only")
 		pull.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
 		if out, err := pull.CombinedOutput(); err != nil {
-			return fmt.Errorf("git pull failed: %w\n%s", err, string(out))
+			sanitized := gitTokenRe.ReplaceAll(out, []byte("https://"))
+			return fmt.Errorf("git pull failed: %w\n%s", err, sanitized)
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -18,6 +19,8 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 )
+
+var tunNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,16}$`)
 
 // Server manages an embedded WireGuard tunnel.
 type Server struct {
@@ -65,6 +68,11 @@ func (s *Server) Start() error {
 	if err != nil {
 		tunDevice.Close()
 		return fmt.Errorf("wg: get TUN device name: %w", err)
+	}
+	// Validate the name is a safe interface name (alphanumeric, hyphens, underscores only).
+	if !tunNameRe.MatchString(actualName) {
+		tunDevice.Close()
+		return fmt.Errorf("wg: unexpected TUN device name: %q", actualName)
 	}
 
 	// 2. Create WireGuard device.

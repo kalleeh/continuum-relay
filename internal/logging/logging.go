@@ -5,16 +5,25 @@ import (
 	"os"
 )
 
+const maxLogSize = 50 * 1024 * 1024 // 50 MB
+
 func Setup(logPath string) {
-	var handler slog.Handler
-	if logPath != "" {
-		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
-		if err == nil {
-			handler = slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo})
-		}
+	if logPath == "" || logPath == "stderr" {
+		// stderr: no rotation needed
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		return
 	}
-	if handler == nil {
-		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+
+	// Rotate if too large
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > maxLogSize {
+		_ = os.Rename(logPath, logPath+".1")
 	}
-	slog.SetDefault(slog.New(handler))
+
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	if err != nil {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		slog.Warn("could not open log file, using stderr", "path", logPath, "err", err)
+		return
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(f, nil)))
 }
