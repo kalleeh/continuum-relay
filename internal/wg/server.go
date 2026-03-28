@@ -183,6 +183,7 @@ func (s *Server) buildUAPIConfig() (string, error) {
 		}
 	}
 
+	b.WriteString("\n") // UAPI requires blank line to terminate the set command
 	return b.String(), nil
 }
 

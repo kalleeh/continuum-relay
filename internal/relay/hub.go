@@ -148,7 +148,22 @@ func (h *Hub) SendPush(sessionName, resultSummary string) {
 		tok := tok
 		go func() {
 			if err := h.apnsClient.Send(tok, title, body, sessionName); err != nil {
-				slog.Warn("APNs push failed", "err", err, "token_suffix", tok[max(0, len(tok)-8):])
+				if strings.Contains(err.Error(), "410") {
+					// APNs says token is invalid or expired; remove it
+					go func() {
+						h.tokenMu.Lock()
+						defer h.tokenMu.Unlock()
+						for i, t := range h.deviceTokens {
+							if t == tok {
+								h.deviceTokens = append(h.deviceTokens[:i], h.deviceTokens[i+1:]...)
+								slog.Info("removed stale APNs device token", "token_suffix", tok[max(0, len(tok)-8):])
+								break
+							}
+						}
+					}()
+				} else {
+					slog.Warn("APNs push failed", "err", err, "token_suffix", tok[max(0, len(tok)-8):])
+				}
 			} else {
 				slog.Info("APNs push sent", "session", sessionName)
 			}

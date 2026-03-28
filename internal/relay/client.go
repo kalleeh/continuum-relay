@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
+	"time"
 	"sync"
 
 	"nhooyr.io/websocket"
@@ -74,10 +74,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				select {
 				case <-ctx.Done():
 					return
-				default:
-					runtime.Gosched()
-					continue
-				}
+				case <-time.After(5 * time.Millisecond):
+				continue
+			}
 			}
 			select {
 			case data, ok := <-ch:

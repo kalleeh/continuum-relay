@@ -72,7 +72,11 @@ func main() {
 	termAddr := os.Getenv("CONTINUUM_TERMINAL_ADDR")
 	if termAddr == "" {
 		// Derive from relay addr: same host, port 7681
-		host, _, _ := net.SplitHostPort(addr)
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			slog.Warn("could not parse relay addr for terminal addr derivation, using default", "addr", addr, "err", err)
+			host = "10.100.0.1"
+		}
 		termAddr = net.JoinHostPort(host, "7681")
 	}
 	termServer := terminal.New(termAddr, token, termCmd)

@@ -212,10 +212,11 @@ func (s *Session) broadcast(data []byte) {
 	}
 	s.mu.Unlock()
 
-	for _, ch := range subs {
+	for id, ch := range subs {
 		select {
 		case ch <- msg:
-		default: // drop if client is slow
+		default:
+			slog.Warn("message dropped for slow subscriber", "session", s.Record.Name, "client", id)
 		}
 	}
 }
@@ -231,10 +232,11 @@ func (s *Session) broadcastRaw(data []byte) {
 		subs[id] = ch
 	}
 	s.mu.Unlock()
-	for _, ch := range subs {
+	for id, ch := range subs {
 		select {
 		case ch <- data:
 		default:
+			slog.Warn("message dropped for slow subscriber", "session", s.Record.Name, "client", id)
 		}
 	}
 }
