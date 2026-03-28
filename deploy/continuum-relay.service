@@ -1,0 +1,25 @@
+[Unit]
+Description=Continuum Relay
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+# CAP_NET_ADMIN is required to create the WireGuard TUN device.
+# This replaces running as root — ubuntu user gets only this one capability.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+EnvironmentFile=/etc/continuum/env
+ExecStart=/usr/local/bin/continuum-relay
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/continuum
+ReadOnlyPaths=/etc/wireguard /etc/continuum
+StandardOutput=append:/var/log/continuum/relay.log
+StandardError=append:/var/log/continuum/relay.log
+
+[Install]
+WantedBy=multi-user.target
