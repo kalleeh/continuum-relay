@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/continuum-app/continuum-relay/internal/apns"
@@ -37,12 +39,35 @@ func (h *Hub) ListSessions() []SessionRecord {
 	return records
 }
 
+func validateWorkingDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	clean := filepath.Clean(dir)
+	if strings.Contains(clean, "..") {
+		return fmt.Errorf("working directory must not contain ..")
+	}
+	allowed := []string{"/home/", "/root/", "/tmp/", "/var/"}
+	for _, prefix := range allowed {
+		if strings.HasPrefix(clean, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("working directory must be under /home/, /root/, /tmp/, or /var/")
+}
+
 func (h *Hub) CreateSession(name, cwd, sessionType string) (*Session, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if _, exists := h.sessions[name]; exists {
 		return h.sessions[name], nil // attach to existing
+	}
+
+	if cwd != "" {
+		if err := validateWorkingDir(cwd); err != nil {
+			return nil, fmt.Errorf("invalid cwd: %w", err)
+		}
 	}
 
 	s := NewSession(name, cwd)

@@ -7,6 +7,7 @@ package terminal
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/creack/pty"
 	"nhooyr.io/websocket"
@@ -46,7 +48,12 @@ func (s *Server) Run() error {
 		return err
 	}
 	slog.Info("terminal server listening", "addr", s.addr)
-	return http.Serve(ln, s)
+	srv := &http.Server{
+		Handler:     s,
+		ReadTimeout: 30 * time.Second,
+		IdleTimeout: 2 * time.Minute,
+	}
+	return srv.Serve(ln)
 }
 
 // ServeHTTP implements http.Handler. Serves only /ws; all other paths return 404.
@@ -71,6 +78,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Error("websocket accept failed", "err", err)
 		return
 	}
+	conn.SetReadLimit(1 << 20) // 1MB per message
 
 	slog.Info("terminal client connected", "ip", r.RemoteAddr)
 	s.handleConn(r.Context(), conn)
@@ -88,7 +96,7 @@ func (s *Server) checkAuth(r *http.Request) bool {
 		return false
 	}
 	expected := "continuum:" + s.token
-	return string(decoded) == expected
+	return subtle.ConstantTimeCompare([]byte(decoded), []byte(expected)) == 1
 }
 
 // handleConn spawns a PTY process and bridges it to the WebSocket connection.

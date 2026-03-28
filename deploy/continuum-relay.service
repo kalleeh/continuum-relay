@@ -13,10 +13,11 @@ EnvironmentFile=/etc/continuum/env
 ExecStart=/usr/local/bin/continuum-relay
 Restart=always
 RestartSec=5
-NoNewPrivileges=false
+NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/log/continuum
+ReadOnlyPaths=/etc/wireguard /etc/continuum
 StandardOutput=append:/var/log/continuum/relay.log
 StandardError=append:/var/log/continuum/relay.log
 

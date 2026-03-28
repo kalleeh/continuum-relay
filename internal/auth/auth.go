@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"sync"
 	"time"
@@ -37,7 +38,7 @@ func (a *Authenticator) ValidateRequest(r *http.Request) bool {
 
 	// Check token
 	provided := extractBearer(r.Header.Get("Authorization"))
-	if provided == "" || provided != a.token {
+	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
 		a.recordFailure(ip)
 		return false
 	}
@@ -81,9 +82,8 @@ func extractBearer(header string) string {
 }
 
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
-	}
+	// Do not trust X-Forwarded-For. The server is accessed directly
+	// over WireGuard, not through a reverse proxy.
 	host := r.RemoteAddr
 	for i := len(host) - 1; i >= 0; i-- {
 		if host[i] == ':' {

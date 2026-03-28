@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"nhooyr.io/websocket"
 
@@ -39,8 +40,14 @@ func (s *Server) Run() error {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	srv := &http.Server{
+		Addr:        s.addr,
+		Handler:     mux,
+		ReadTimeout: 30 * time.Second,
+		IdleTimeout: 2 * time.Minute,
+	}
 	slog.Info("continuum-relay listening", "addr", s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	return srv.ListenAndServe()
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +64,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		slog.Error("websocket accept failed", "err", err)
 		return
 	}
+	conn.SetReadLimit(1 << 20) // 1MB per message
 	defer conn.CloseNow()
 
 	clientID := newClientID()

@@ -266,16 +266,20 @@ func (s *Session) handlePermissionRequest(line []byte, evt map[string]any, mode 
 	s.broadcastRaw(msg)
 
 	// Block readOutput goroutine until iOS responds or timeout
+	timer := time.NewTimer(5 * time.Minute)
+	defer timer.Stop()
+
 	select {
 	case allow := <-respCh:
 		s.permissionMu.Lock()
 		s.pendingPerm = nil
 		s.permissionMu.Unlock()
 		s.sendPermissionDecision(allow, mode)
-	case <-time.After(5 * time.Minute):
+	case <-timer.C:
 		s.permissionMu.Lock()
 		s.pendingPerm = nil
 		s.permissionMu.Unlock()
+		slog.Info("permission request timed out, auto-denying", "session", s.Record.Name)
 		s.sendPermissionDecision(false, mode)
 	}
 }

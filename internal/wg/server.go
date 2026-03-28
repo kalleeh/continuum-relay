@@ -119,9 +119,31 @@ func (s *Server) InterfaceIP() string {
 	return ip.String()
 }
 
+func validateNoNewlines(field, value string) error {
+	if strings.ContainsAny(value, "\n\r") {
+		return fmt.Errorf("wg config field %q contains invalid characters", field)
+	}
+	return nil
+}
+
 // buildUAPIConfig constructs the UAPI text protocol string for IpcSet.
 // Format: https://www.wireguard.com/xplatform/#configuration-protocol
 func (s *Server) buildUAPIConfig() (string, error) {
+	if err := validateNoNewlines("PrivateKey", s.cfg.Interface.PrivateKey); err != nil {
+		return "", err
+	}
+	if err := validateNoNewlines("Address", s.cfg.Interface.Address); err != nil {
+		return "", err
+	}
+	for _, peer := range s.cfg.Peers {
+		if err := validateNoNewlines("PublicKey", peer.PublicKey); err != nil {
+			return "", err
+		}
+		if err := validateNoNewlines("Endpoint", peer.Endpoint); err != nil {
+			return "", err
+		}
+	}
+
 	var b strings.Builder
 
 	privHex, err := b64ToHex(s.cfg.Interface.PrivateKey)
@@ -197,6 +219,9 @@ func b64ToHex(b64 string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		return "", err
+	}
+	if len(raw) != 32 {
+		return "", fmt.Errorf("WireGuard key must be 32 bytes, got %d", len(raw))
 	}
 	return hex.EncodeToString(raw), nil
 }

@@ -20,6 +20,7 @@ import (
 var (
 	sessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 	tokenRe       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	apnsTokenRe   = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 )
 
 type ClientMessage struct {
@@ -130,6 +131,10 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
 
 		case "attach_session":
+			if !sessionNameRe.MatchString(msg.Name) {
+				writeError(ctx, conn, "invalid_name", "Session name invalid")
+				continue
+			}
 			s, ok := hub.GetSession(msg.Name)
 			if !ok {
 				writeError(ctx, conn, "not_found", "Session not found")
@@ -145,28 +150,45 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			unsubscribe()
 
 		case "send_message":
+			if !sessionNameRe.MatchString(msg.Session) {
+				writeError(ctx, conn, "invalid_name", "Session name invalid")
+				continue
+			}
 			if s, ok := hub.GetSession(msg.Session); ok {
 				_ = s.Send(msg.Content)
 			}
 
 		case "interrupt":
+			if !sessionNameRe.MatchString(msg.Session) {
+				writeError(ctx, conn, "invalid_name", "Session name invalid")
+				continue
+			}
 			if s, ok := hub.GetSession(msg.Session); ok {
 				s.Interrupt()
 			}
 
 		case "permission_response":
+			if !sessionNameRe.MatchString(msg.Session) {
+				writeError(ctx, conn, "invalid_name", "Session name invalid")
+				continue
+			}
 			if s, ok := hub.GetSession(msg.Session); ok {
 				s.RespondToPermission(msg.ID, msg.Allow)
 			}
 
 		case "delete_session":
+			if !sessionNameRe.MatchString(msg.Name) {
+				writeError(ctx, conn, "invalid_name", "Session name invalid")
+				continue
+			}
 			hub.DeleteSession(msg.Name)
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
 
 		case "register_device":
-			if msg.DeviceToken != "" {
-				hub.RegisterDevice(msg.DeviceToken)
+			if msg.DeviceToken == "" || !apnsTokenRe.MatchString(msg.DeviceToken) {
+				continue
 			}
+			hub.RegisterDevice(msg.DeviceToken)
 
 		case "rotate_token":
 			if !tokenRe.MatchString(msg.Token) {
@@ -205,8 +227,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			go func() {
 				err := projects.SyncProject(slug, token)
 				if err != nil {
+					slog.Warn("project sync failed", "slug", slug, "err", err)
 					writeJSON(ctx, conn, map[string]string{
-						"type": "project_sync_error", "slug": slug, "message": err.Error(),
+						"type": "project_sync_error", "slug": slug, "message": "sync failed",
 					})
 				} else {
 					parts := strings.SplitN(slug, "/", 2)
