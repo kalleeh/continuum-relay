@@ -1,0 +1,223 @@
+#cloud-config
+# Standalone dev environment for Ubuntu 24.04 (Lightsail / EC2)
+# Mirrors the tooling from coder/agent-shell/template.tf without Docker or Coder.
+
+# ── SSH hardening ────────────────────────────────────────────────────────────
+ssh_pwauth: false
+
+# ── System packages ──────────────────────────────────────────────────────────
+package_update: true
+package_upgrade: true
+packages:
+  - zsh
+  - tmux
+  - git
+  - curl
+  - jq
+  - htop
+  - build-essential
+  - unzip
+  - unattended-upgrades
+
+# ── Configuration files ──────────────────────────────────────────────────────
+write_files:
+  # -- SSH hardening --
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      PermitRootLogin prohibit-password
+
+  # -- .zshrc --
+  - path: /home/ubuntu/.zshrc
+    owner: ubuntu:ubuntu
+    permissions: "0644"
+    content: |
+      export PATH="$HOME/.local/bin:$HOME/.fzf/bin:$PATH"
+      # fnm (Node version manager)
+      eval "$(fnm env --use-on-cd --shell zsh)"
+      # Source AI credentials if present (Claude Code / Kiro CLI)
+      [ -f ~/.ai-credentials ] && source ~/.ai-credentials
+
+      # History
+      HISTFILE=~/.zsh_history
+      HISTSIZE=10000
+      SAVEHIST=10000
+      setopt share_history
+      setopt hist_ignore_dups
+      setopt hist_ignore_space
+
+      # Key bindings (emacs mode)
+      bindkey -e
+      bindkey '^[[A' history-search-backward
+      bindkey '^[[B' history-search-forward
+
+      # Completion
+      autoload -Uz compinit && compinit -C
+
+      # Starship prompt
+      eval "$(starship init zsh)"
+
+      # fzf keybindings and completion
+      [ -f ~/.fzf/bin/fzf ] && eval "$(fzf --zsh 2>/dev/null)" || true
+
+      # zoxide (use 'z' instead of 'cd')
+      eval "$(zoxide init zsh)"
+
+      # Aliases
+      alias ll="ls -la --color=auto"
+      alias gs="git status"
+      alias gd="git diff"
+      alias gl="git log --oneline -20"
+
+      # Default working directory
+      [[ "$PWD" == "$HOME" ]] && cd ~/projects
+
+      # First-login help: GitHub setup
+      if ! gh auth status &>/dev/null 2>&1; then
+        echo ""
+        echo "  GitHub is not configured yet. To clone and push repositories:"
+        echo ""
+        echo "    1. Run:  gh auth login"
+        echo "    2. Select: GitHub.com > HTTPS > Login with a web browser"
+        echo "    3. Copy the code shown, open github.com/login/device on your phone"
+        echo "    4. Paste the code and approve"
+        echo ""
+        echo "  Then clone a repo:"
+        echo "    gh repo clone kalleeh/your-repo"
+        echo "    cd your-repo"
+        echo ""
+        echo "  Git pushes and pulls work automatically after login."
+        echo ""
+      fi
+
+      # Auto-attach to tmux session (survives disconnects)
+      if command -v tmux &>/dev/null && [[ -z "$TMUX" ]]; then
+        tmux new -A -s main
+      fi
+
+  # -- Starship config (minimal, fast) --
+  - path: /home/ubuntu/.config/starship.toml
+    owner: ubuntu:ubuntu
+    permissions: "0644"
+    content: |
+      format = "$directory$git_branch$git_status$character"
+
+      [directory]
+      truncation_length = 3
+      truncation_symbol = ".../"
+
+      [git_branch]
+      format = "[$branch]($style) "
+      style = "bold purple"
+
+      [git_status]
+      format = '([$all_status$ahead_behind]($style) )'
+      style = "bold red"
+
+      [character]
+      success_symbol = "[>](bold green)"
+      error_symbol = "[>](bold red)"
+
+  # -- tmux config --
+  - path: /home/ubuntu/.tmux.conf
+    owner: ubuntu:ubuntu
+    permissions: "0644"
+    content: |
+      set -g default-terminal "tmux-256color"
+      set -ag terminal-overrides ",xterm-256color:RGB"
+      set -g default-shell /usr/bin/zsh
+
+      # Propagate AI credentials from the connecting shell into the session on
+      # every attach, so existing panes pick up updated .ai-credentials values
+      set -ga update-environment "ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL AWS_BEARER_TOKEN_BEDROCK CLAUDE_CODE_USE_BEDROCK AWS_REGION"
+
+      # Mouse support (scroll, click panes, resize)
+      set -g mouse on
+
+      # Start windows/panes at 1 instead of 0
+      set -g base-index 1
+      setw -g pane-base-index 1
+      set -g renumber-windows on
+
+      # Prefix: Ctrl-a
+      unbind C-b
+      set -g prefix C-a
+      bind C-a send-prefix
+
+      # Split panes with | and -
+      bind | split-window -h -c "#{pane_current_path}"
+      bind - split-window -v -c "#{pane_current_path}"
+
+      # New window keeps current path
+      bind c new-window -c "#{pane_current_path}"
+
+      # Status bar
+      set -g status-style "bg=default,fg=white"
+      set -g status-left "#[bold]#S "
+      set -g status-right ""
+      set -g status-left-length 20
+
+      # Scrollback
+      set -g history-limit 50000
+
+  # -- Kiro CLI config with Context7 MCP server --
+  - path: /home/ubuntu/.config/kiro/config.json
+    owner: ubuntu:ubuntu
+    permissions: "0644"
+    content: |
+      {
+        "mcpServers": {
+          "Context7": {
+            "command": "npx",
+            "args": ["-y", "@upstash/context7-mcp"],
+            "env": {},
+            "disabled": false,
+            "autoApprove": []
+          }
+        }
+      }
+
+# ── Run commands ─────────────────────────────────────────────────────────────
+runcmd:
+  # -- Ensure config directories exist with correct ownership --
+  - mkdir -p /home/ubuntu/.local/bin
+  - mkdir -p /home/ubuntu/.config/kiro
+  - mkdir -p /home/ubuntu/projects
+  - chown -R ubuntu:ubuntu /home/ubuntu/.local
+  - chown -R ubuntu:ubuntu /home/ubuntu/.config
+  - chown -R ubuntu:ubuntu /home/ubuntu/projects
+
+  # -- Node.js LTS via fnm --
+  - su - ubuntu -c 'curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir ~/.local/bin --skip-shell'
+  - su - ubuntu -c '~/.local/bin/fnm install --lts'
+
+  # -- Starship prompt --
+  - su - ubuntu -c 'curl -fsSL https://starship.rs/install.sh | sh -s -- --bin-dir ~/.local/bin --yes'
+
+  # -- fzf (fuzzy finder) --
+  - su - ubuntu -c 'git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install --bin --no-bash --no-fish --no-zsh'
+
+  # -- zoxide (smart cd) --
+  - su - ubuntu -c 'curl -fsSL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh'
+
+  # -- Claude Code CLI --
+  - su - ubuntu -c 'eval "$(~/.local/bin/fnm env)" && npm install -g @anthropic-ai/claude-code'
+
+  # -- Kiro CLI --
+  - su - ubuntu -c 'curl -fsSL https://cli.kiro.dev/install | bash || true'
+
+  # -- GitHub CLI --
+  - wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+  - apt-get update -y
+  - apt-get install -y gh
+
+  # -- Set zsh as default shell for ubuntu --
+  - chsh -s /usr/bin/zsh ubuntu
+
+  # -- Restart sshd to apply hardening --
+  - systemctl restart ssh

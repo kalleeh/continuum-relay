@@ -1,0 +1,117 @@
+name: Release
+
+# Builds the four release binaries plus the deploy assets and publishes them
+# as a GitHub Release on this repo. Triggered by pushing a `vMAJOR.MINOR.PATCH`
+# tag, or manually via workflow_dispatch.
+#
+# Example:
+#     git tag v0.4.0
+#     git push origin v0.4.0
+#
+# No cross-repo PAT needed: the workflow uses the per-job GITHUB_TOKEN, which
+# has Contents: write scope on this same repository.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. v0.4.0). Required when triggered manually.'
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Build and publish ${{ github.event.inputs.version || github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        # Pinned to a specific commit so a compromise of the actions/checkout
+        # repo or a re-tag of v4 cannot inject code into a release job.
+        # Bump along with `actions/setup-go`.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Determine version
+        id: version
+        # Pass untrusted-by-design fields (workflow_dispatch input, ref name)
+        # through environment variables, not ${{ }} expression interpolation
+        # into the shell. Direct interpolation would let a malicious tag
+        # name or input run arbitrary commands with this job's secrets.
+        env:
+          VERSION_INPUT: ${{ github.event.inputs.version }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$GH_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$VERSION_INPUT"
+          else
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine version"
+            exit 1
+          fi
+          # Belt-and-braces: only allow safe characters in version. Catches
+          # any way a malicious tag could slip past Git's own restrictions.
+          case "$VERSION" in
+            v[0-9]*)            ;;
+            *)
+              echo "::error::Refusing to publish unsafe version string: $VERSION"
+              exit 1
+              ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing as $VERSION"
+
+      - name: Build all four platforms
+        run: make release
+
+      - name: Refresh checksums.txt to include deploy assets
+        run: |
+          chmod +x deploy.sh
+          sha256sum continuum-relay-linux-amd64 \
+                    continuum-relay-linux-arm64 \
+                    continuum-relay-darwin-amd64 \
+                    continuum-relay-darwin-arm64 \
+                    deploy.sh \
+                    cloud-init.yaml \
+            > checksums.txt
+          cat checksums.txt
+
+      - name: Verify checksums file
+        run: |
+          test -f checksums.txt || { echo "::error::checksums.txt missing"; exit 1; }
+          for f in continuum-relay-linux-amd64 continuum-relay-linux-arm64 \
+                   continuum-relay-darwin-amd64 continuum-relay-darwin-arm64 \
+                   deploy.sh cloud-init.yaml; do
+            grep -q "  $f$" checksums.txt || { echo "::error::missing $f in checksums.txt"; exit 1; }
+          done
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          NOTES="Auto-built from ${GITHUB_SHA::7}."
+
+          gh release create "$VERSION" \
+            --title "continuum-relay $VERSION" \
+            --notes "$NOTES" \
+            continuum-relay-linux-amd64 \
+            continuum-relay-linux-arm64 \
+            continuum-relay-darwin-amd64 \
+            continuum-relay-darwin-arm64 \
+            deploy.sh \
+            cloud-init.yaml \
+            checksums.txt
