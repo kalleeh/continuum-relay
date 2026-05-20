@@ -85,6 +85,15 @@ func discoverTmuxSessions() []SessionRecord {
 			continue
 		}
 		name := parts[0]
+		// Only surface relay-managed sessions (prefixed "cx-"); skip all others
+		// (e.g. the user's own "hermes", "main" sessions) to avoid confusion and
+		// to prevent the iOS app from re-attaching to a session it didn't create.
+		if !strings.HasPrefix(name, "cx-") {
+			continue
+		}
+		// Strip the "cx-" prefix before returning to the client so the app sees
+		// the logical name (e.g. "terminal") rather than the internal tmux name.
+		name = strings.TrimPrefix(name, "cx-")
 		// Skip sessions with names that don't pass validation (numbered junk, etc.)
 		if len(name) > 64 {
 			continue
