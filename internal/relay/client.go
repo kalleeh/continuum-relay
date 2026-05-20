@@ -29,12 +29,11 @@ type ClientMessage struct {
 	CWD         string `json:"cwd,omitempty"`
 	SessionType string `json:"sessionType,omitempty"`
 	Session     string `json:"session,omitempty"`
-	Content     string `json:"content,omitempty"`
 	GitHubToken string `json:"githubToken,omitempty"`
 	Slug        string `json:"slug,omitempty"`
-	ID          string `json:"id,omitempty"`
-	Allow       bool   `json:"allow,omitempty"`
-	Token       string `json:"token,omitempty"`       // rotate_token
+	ID          string `json:"id,omitempty"`           // tool_permission_response
+	Allow       bool   `json:"allow,omitempty"`        // tool_permission_response
+	Token       string `json:"token,omitempty"`        // rotate_token
 	DeviceToken string `json:"device_token,omitempty"` // register_device
 }
 
@@ -178,33 +177,6 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 
 		case "detach_session":
 			unsubscribe()
-
-		case "send_message":
-			if !sessionNameRe.MatchString(msg.Session) {
-				writeError(ctx, conn, "invalid_name", "Session name invalid")
-				continue
-			}
-			if s, ok := hub.GetSession(msg.Session); ok {
-				_ = s.Send(msg.Content)
-			}
-
-		case "interrupt":
-			if !sessionNameRe.MatchString(msg.Session) {
-				writeError(ctx, conn, "invalid_name", "Session name invalid")
-				continue
-			}
-			if s, ok := hub.GetSession(msg.Session); ok {
-				s.Interrupt()
-			}
-
-		case "permission_response":
-			if !sessionNameRe.MatchString(msg.Session) {
-				writeError(ctx, conn, "invalid_name", "Session name invalid")
-				continue
-			}
-			if s, ok := hub.GetSession(msg.Session); ok {
-				s.RespondToPermission(msg.ID, msg.Allow)
-			}
 
 		case "delete_session":
 			if !sessionNameRe.MatchString(msg.Name) {

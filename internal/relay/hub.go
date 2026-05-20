@@ -168,10 +168,7 @@ func (h *Hub) GetSession(name string) (*Session, bool) {
 func (h *Hub) DeleteSession(name string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if s, ok := h.sessions[name]; ok {
-		s.Stop()
-		delete(h.sessions, name)
-	}
+	delete(h.sessions, name)
 }
 
 func (h *Hub) SessionListJSON() []byte {
@@ -202,7 +199,12 @@ func (h *Hub) RegisterDevice(token string) {
 }
 
 // SendPush fires an APNs SESSION_FINISHED notification to all registered devices.
-// Called from the session goroutine; does not block.
+// Currently unused: the previous trigger lived in the now-removed Claude Code
+// stream-json relay path. Sessions are PTY/tmux-backed and have no event the
+// relay can observe, so push is dormant until a new trigger is wired (e.g. an
+// iOS-side Live Activity → APNs path or a tmux pane-output watcher).
+// Kept here so the device-registration wire (RegisterDevice) and APNs config
+// remain in place for whichever trigger lands next.
 func (h *Hub) SendPush(sessionName, resultSummary string) {
 	if h.apnsClient == nil {
 		return
