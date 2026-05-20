@@ -51,6 +51,22 @@ The supported install path is the bundled `deploy.sh`:
 binaries — grab them from
 <https://github.com/kalleeh/continuum-relay/releases/latest>.
 
+### In-place upgrade (already deployed)
+
+To upgrade an existing install to the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kalleeh/continuum-relay/main/install.sh | sudo sh
+```
+
+The script detects OS/arch, verifies the SHA-256 against the release's
+`checksums.txt`, replaces `/usr/local/bin/continuum-relay`, and restarts
+the systemd unit (or LaunchDaemon on macOS). Pin a specific release with
+`CONTINUUM_VERSION=v0.3.1`, or skip the restart with `CONTINUUM_NO_RESTART=1`.
+
+This script does *not* provision a server, configure WireGuard, or set up
+systemd — use `deploy.sh` for first-time installs.
+
 ### Manual install
 
 ```bash
