@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 var tunNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,16}$`)
@@ -27,6 +29,9 @@ type Server struct {
 	cfg    *Config
 	device *device.Device
 	tunDev tun.Device
+	// Net is the virtual TCP/IP stack (netstack mode only, used on macOS).
+	// When non-nil, the relay should use Net.ListenTCP instead of binding to the TUN IP.
+	Net *netstack.Net
 }
 
 // New creates a WireGuard server from parsed config. Does not start the tunnel yet.
@@ -51,10 +56,60 @@ func New(cfg *Config) (*Server, error) {
 //
 // Returns when tunnel is active.
 func (s *Server) Start() error {
-	tunName := "wg0"
+	// On macOS, use netstack (virtual TCP/IP stack in userspace) instead of a
+	// real TUN device. macOS cannot route packets destined for a TUN interface's
+	// own IP back to the local TCP stack — they get consumed by the userspace
+	// WireGuard and never reach listeners. Netstack bypasses this entirely.
 	if runtime.GOOS == "darwin" {
-		tunName = "utun"
+		return s.startNetstack()
 	}
+	return s.startTUN()
+}
+
+func (s *Server) startNetstack() error {
+	ip, _, err := net.ParseCIDR(s.cfg.Interface.Address)
+	if err != nil {
+		return fmt.Errorf("wg: parse interface address: %w", err)
+	}
+	addr, ok := netip.AddrFromSlice(ip.To4())
+	if !ok {
+		return fmt.Errorf("wg: invalid IPv4 address: %s", ip)
+	}
+
+	tunDevice, tnet, err := netstack.CreateNetTUN(
+		[]netip.Addr{addr},
+		[]netip.Addr{netip.MustParseAddr("1.1.1.1")},
+		1420,
+	)
+	if err != nil {
+		return fmt.Errorf("wg: create netstack TUN: %w", err)
+	}
+	s.tunDev = tunDevice
+	s.Net = tnet
+
+	logger := device.NewLogger(device.LogLevelError, "[wg] ")
+	wgDev := device.NewDevice(tunDevice, conn.NewDefaultBind(), logger)
+
+	uapiCfg, err := s.buildUAPIConfig()
+	if err != nil {
+		wgDev.Close()
+		return fmt.Errorf("wg: build UAPI config: %w", err)
+	}
+	if err := wgDev.IpcSet(uapiCfg); err != nil {
+		wgDev.Close()
+		return fmt.Errorf("wg: IpcSet: %w", err)
+	}
+	if err := wgDev.Up(); err != nil {
+		wgDev.Close()
+		return fmt.Errorf("wg: device.Up: %w", err)
+	}
+
+	s.device = wgDev
+	return nil
+}
+
+func (s *Server) startTUN() error {
+	tunName := "wg0"
 
 	// 1. Create TUN device.
 	tunDevice, err := tun.CreateTUN(tunName, device.DefaultMTU)
@@ -78,7 +133,6 @@ func (s *Server) Start() error {
 	// 2. Create WireGuard device.
 	logger := device.NewLogger(device.LogLevelError, "[wg] ")
 	wgDev := device.NewDevice(tunDevice, conn.NewDefaultBind(), logger)
-	s.device = wgDev
 
 	// 3. Configure via UAPI.
 	uapiCfg, err := s.buildUAPIConfig()
@@ -102,6 +156,10 @@ func (s *Server) Start() error {
 		wgDev.Close()
 		return fmt.Errorf("wg: configure interface %q: %w", actualName, err)
 	}
+
+	// Only assign to s.device after all setup succeeds, so s.Close() cannot
+	// double-close a device that was already closed on an error path above.
+	s.device = wgDev
 
 	return nil
 }
@@ -127,6 +185,51 @@ func (s *Server) InterfaceIP() string {
 	return ip.String()
 }
 
+// AddPeer pushes a new peer to the live WireGuard device via the in-process
+// UAPI. Allowed IPs are appended; existing peer config (if the public key is
+// already known to the device) is preserved.
+//
+// Production callers should pair this with an append to wg0.conf so the
+// peer survives a relay restart. See peers.Manager.Add.
+func (s *Server) AddPeer(pubKeyB64, allowedCIDR string) error {
+	if s.device == nil {
+		return fmt.Errorf("wg: device not running")
+	}
+	if err := validateNoNewlines("public_key", pubKeyB64); err != nil {
+		return err
+	}
+	if err := validateNoNewlines("allowed_ip", allowedCIDR); err != nil {
+		return err
+	}
+	pubHex, err := b64ToHex(pubKeyB64)
+	if err != nil {
+		return fmt.Errorf("wg: public_key decode: %w", err)
+	}
+	cmd := fmt.Sprintf("public_key=%s\nallowed_ip=%s\n\n", pubHex, allowedCIDR)
+	return s.device.IpcSet(cmd)
+}
+
+// RemovePeer removes a peer from the live WireGuard device via the in-process
+// UAPI. Subsequent handshake attempts from that peer's public key are
+// rejected immediately — this is the actual access-revocation primitive.
+//
+// Production callers should pair this with a wg0.conf rewrite so the peer
+// stays revoked after a relay restart. See peers.Manager.Remove.
+func (s *Server) RemovePeer(pubKeyB64 string) error {
+	if s.device == nil {
+		return fmt.Errorf("wg: device not running")
+	}
+	if err := validateNoNewlines("public_key", pubKeyB64); err != nil {
+		return err
+	}
+	pubHex, err := b64ToHex(pubKeyB64)
+	if err != nil {
+		return fmt.Errorf("wg: public_key decode: %w", err)
+	}
+	cmd := fmt.Sprintf("public_key=%s\nremove=true\n\n", pubHex)
+	return s.device.IpcSet(cmd)
+}
+
 func validateNoNewlines(field, value string) error {
 	if strings.ContainsAny(value, "\n\r") {
 		return fmt.Errorf("wg config field %q contains invalid characters", field)
@@ -150,6 +253,9 @@ func (s *Server) buildUAPIConfig() (string, error) {
 		if err := validateNoNewlines("Endpoint", peer.Endpoint); err != nil {
 			return "", err
 		}
+		if err := validateNoNewlines("PreSharedKey", peer.PreSharedKey); err != nil {
+			return "", err
+		}
 	}
 
 	var b strings.Builder
@@ -159,7 +265,8 @@ func (s *Server) buildUAPIConfig() (string, error) {
 		return "", fmt.Errorf("private_key base64 decode: %w", err)
 	}
 
-	b.WriteString("set=1\n")
+	// device.IpcSet takes the configuration body only — the "set=1" verb
+	// is consumed by the UAPI socket layer and must NOT be included here.
 	fmt.Fprintf(&b, "private_key=%s\n", privHex)
 	if s.cfg.Interface.ListenPort > 0 {
 		fmt.Fprintf(&b, "listen_port=%d\n", s.cfg.Interface.ListenPort)
@@ -171,6 +278,13 @@ func (s *Server) buildUAPIConfig() (string, error) {
 			return "", fmt.Errorf("peer public_key base64 decode: %w", err)
 		}
 		fmt.Fprintf(&b, "public_key=%s\n", pubHex)
+		if peer.PreSharedKey != "" {
+			pskHex, err := b64ToHex(peer.PreSharedKey)
+			if err != nil {
+				return "", fmt.Errorf("peer preshared_key base64 decode: %w", err)
+			}
+			fmt.Fprintf(&b, "preshared_key=%s\n", pskHex)
+		}
 		b.WriteString("replace_allowed_ips=true\n")
 		for _, cidr := range peer.AllowedIPs {
 			fmt.Fprintf(&b, "allowed_ip=%s\n", cidr)

@@ -1,0 +1,10 @@
+# Cross-compiled release binaries — built by `make release`, published to
+# kalleeh/continuum-relay via GitHub Actions, never committed to source.
+continuum-relay-linux-amd64
+continuum-relay-linux-arm64
+continuum-relay-darwin-amd64
+continuum-relay-darwin-arm64
+checksums.txt
+
+# Stale build/dist directories that older flows produced.
+/dist/

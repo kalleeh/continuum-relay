@@ -57,7 +57,11 @@ func (a *Authenticator) isLocked(ip string) bool {
 			still = append(still, t)
 		}
 	}
-	a.failures[ip] = still
+	if len(still) == 0 {
+		delete(a.failures, ip)
+	} else {
+		a.failures[ip] = still
+	}
 	return len(still) >= maxFailures
 }
 

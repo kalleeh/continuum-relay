@@ -36,6 +36,7 @@ type SessionRecord struct {
 	Project          string        `json:"project,omitempty"`
 	LastActivity     time.Time     `json:"lastActivity"`
 	LastSnippet      string        `json:"lastOutputSnippet,omitempty"`
+	Source           string        `json:"source,omitempty"` // "relay" (app-created) or "system" (discovered tmux)
 }
 
 const recentOutputBuffer = 50 // replay up to last 50 events to new subscribers
@@ -103,7 +104,11 @@ func (s *Session) Start() error {
 		cancel()
 		return err
 	}
-	stderr, _ := cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return err
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -181,8 +186,11 @@ func (s *Session) readOutput(r io.Reader) {
 }
 
 func (s *Session) waitForExit() {
-	if s.cmd != nil {
-		_ = s.cmd.Wait()
+	s.mu.RLock()
+	cmd := s.cmd
+	s.mu.RUnlock()
+	if cmd != nil {
+		_ = cmd.Wait()
 	}
 	s.mu.Lock()
 	s.Record.Status = StatusFinished
@@ -335,10 +343,15 @@ func (s *Session) Subscribe(clientID string) <-chan []byte {
 	recent := make([][]byte, len(s.recentOutput))
 	copy(recent, s.recentOutput)
 	s.mu.Unlock()
-	// Send buffered events before live ones
+	// Send buffered events before live ones. Use non-blocking send so a slow or
+	// already-closed subscriber cannot block the replay goroutine indefinitely.
 	go func() {
 		for _, msg := range recent {
-			ch <- msg
+			select {
+			case ch <- msg:
+			default:
+				// Channel full; drop the buffered event rather than blocking.
+			}
 		}
 	}()
 	return ch

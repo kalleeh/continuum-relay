@@ -38,9 +38,14 @@ type ClientMessage struct {
 	DeviceToken string `json:"device_token,omitempty"` // register_device
 }
 
-func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
+func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, broker *PermissionBroker, clientID string) {
 	slog.Info("client connected", "id", clientID)
 	defer slog.Info("client disconnected", "id", clientID)
+
+	broker.RegisterClient(clientID, func(msg []byte) {
+		conn.Write(ctx, websocket.MessageText, msg)
+	})
+	defer broker.UnregisterClient(clientID)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -49,6 +54,7 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		mu                sync.Mutex
 		subscribedSession *Session
 		outputCh          <-chan []byte
+		chReady           = make(chan struct{}, 1)
 	)
 
 	unsubscribe := func() {
@@ -74,9 +80,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(5 * time.Millisecond):
-				continue
-			}
+				case <-chReady:
+					continue
+				}
 			}
 			select {
 			case data, ok := <-ch:
@@ -87,6 +93,23 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 					continue
 				}
 				if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Goroutine: WebSocket ping/pong heartbeat
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := conn.Ping(ctx); err != nil {
 					cancel()
 					return
 				}
@@ -127,6 +150,10 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			subscribedSession = s
 			outputCh = s.Subscribe(clientID)
 			mu.Unlock()
+			select {
+			case chReady <- struct{}{}:
+			default:
+			}
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
 
 		case "attach_session":
@@ -144,6 +171,10 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			subscribedSession = s
 			outputCh = s.Subscribe(clientID)
 			mu.Unlock()
+			select {
+			case chReady <- struct{}{}:
+			default:
+			}
 
 		case "detach_session":
 			unsubscribe()
@@ -245,17 +276,46 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				continue
 			}
 			writeJSON(ctx, conn, map[string]string{"type": "project_removed", "name": msg.Name})
+
+		case "tool_permission_response":
+			if msg.ID != "" {
+				broker.Respond(msg.ID, msg.Allow)
+			}
 		}
 	}
 	<-outDone
 }
 
-// rewriteEnvFile atomically rewrites /etc/continuum/env with the new token.
+// rewriteEnvFile atomically updates CONTINUUM_TOKEN in /etc/continuum/env,
+// preserving all other lines (comments, blank lines, other KEY=VALUE pairs).
 func rewriteEnvFile(newToken string) error {
 	const envPath = "/etc/continuum/env"
-	content := "CONTINUUM_TOKEN=" + newToken + "\n"
+
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "CONTINUUM_TOKEN=") {
+			lines[i] = "CONTINUUM_TOKEN=" + newToken
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Insert before final empty element if file ended with newline.
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = append(lines[:len(lines)-1], "CONTINUUM_TOKEN="+newToken, "")
+		} else {
+			lines = append(lines, "CONTINUUM_TOKEN="+newToken)
+		}
+	}
+
 	tmp := envPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), 0600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, envPath)

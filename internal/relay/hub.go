@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/continuum-app/continuum-relay/internal/apns"
 )
@@ -33,8 +37,76 @@ func (h *Hub) ListSessions() []SessionRecord {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	records := make([]SessionRecord, 0, len(h.sessions))
+	relayNames := make(map[string]bool)
 	for _, s := range h.sessions {
-		records = append(records, s.GetRecord())
+		rec := s.GetRecord()
+		rec.Source = "relay"
+		records = append(records, rec)
+		relayNames[rec.Name] = true
+	}
+
+	// Discover tmux sessions not managed by the relay.
+	for _, sys := range discoverTmuxSessions() {
+		if !relayNames[sys.Name] {
+			records = append(records, sys)
+		}
+	}
+	return records
+}
+
+// discoverTmuxSessions runs `tmux list-sessions` and returns records for
+// sessions not managed by the relay. These are marked with Source="system".
+func discoverTmuxSessions() []SessionRecord {
+	// When running as root (LaunchDaemon), tmux connects to root's server by default.
+	// We need to query the actual user's tmux server instead.
+	var cmd *exec.Cmd
+	detectedUser := os.Getenv("CONTINUUM_USER")
+	if detectedUser == "" {
+		if out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output(); err == nil {
+			detectedUser = strings.TrimSpace(string(out))
+		}
+	}
+	if detectedUser != "" && detectedUser != "root" {
+		cmd = exec.Command("su", "-", detectedUser, "-c", "tmux list-sessions -F '#{session_name}\t#{session_activity}\t#{session_attached}'")
+	} else {
+		cmd = exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}\t#{session_attached}")
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var records []SessionRecord
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		name := parts[0]
+		// Skip sessions with names that don't pass validation (numbered junk, etc.)
+		if len(name) > 64 {
+			continue
+		}
+
+		status := SessionStatus("detached")
+		if parts[2] != "0" {
+			status = StatusRunning
+		}
+
+		var lastActivity time.Time
+		if ts, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+			lastActivity = time.Unix(ts, 0)
+		}
+
+		records = append(records, SessionRecord{
+			Name:         name,
+			Type:         "terminal",
+			Status:       status,
+			LastActivity: lastActivity,
+			Source:       "system",
+		})
 	}
 	return records
 }
@@ -47,13 +119,13 @@ func validateWorkingDir(dir string) error {
 	if strings.Contains(clean, "..") {
 		return fmt.Errorf("working directory must not contain ..")
 	}
-	allowed := []string{"/home/", "/root/", "/tmp/", "/var/"}
+	allowed := []string{"/home/", "/root/", "/tmp/", "/var/", "/Users/"}
 	for _, prefix := range allowed {
 		if strings.HasPrefix(clean, prefix) {
 			return nil
 		}
 	}
-	return fmt.Errorf("working directory must be under /home/, /root/, /tmp/, or /var/")
+	return fmt.Errorf("working directory must be under /home/, /Users/, /root/, /tmp/, or /var/")
 }
 
 func (h *Hub) CreateSession(name, cwd, sessionType string) (*Session, error) {
@@ -74,13 +146,6 @@ func (h *Hub) CreateSession(name, cwd, sessionType string) (*Session, error) {
 	s.hub = h
 	s.Record.Type = sessionType
 	h.sessions[name] = s
-
-	if sessionType == "claudeCode" {
-		if err := s.Start(); err != nil {
-			delete(h.sessions, name)
-			return nil, fmt.Errorf("failed to start session: %w", err)
-		}
-	}
 	return s, nil
 }
 
@@ -150,17 +215,15 @@ func (h *Hub) SendPush(sessionName, resultSummary string) {
 			if err := h.apnsClient.Send(tok, title, body, sessionName); err != nil {
 				if strings.Contains(err.Error(), "410") {
 					// APNs says token is invalid or expired; remove it
-					go func() {
-						h.tokenMu.Lock()
-						defer h.tokenMu.Unlock()
-						for i, t := range h.deviceTokens {
-							if t == tok {
-								h.deviceTokens = append(h.deviceTokens[:i], h.deviceTokens[i+1:]...)
-								slog.Info("removed stale APNs device token", "token_suffix", tok[max(0, len(tok)-8):])
-								break
-							}
+					h.tokenMu.Lock()
+					for i, t := range h.deviceTokens {
+						if t == tok {
+							h.deviceTokens = append(h.deviceTokens[:i], h.deviceTokens[i+1:]...)
+							slog.Info("removed stale APNs device token", "token_suffix", tok[max(0, len(tok)-8):])
+							break
 						}
-					}()
+					}
+					h.tokenMu.Unlock()
 				} else {
 					slog.Warn("APNs push failed", "err", err, "token_suffix", tok[max(0, len(tok)-8):])
 				}
@@ -171,9 +234,3 @@ func (h *Hub) SendPush(sessionName, resultSummary string) {
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

@@ -16,8 +16,10 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/log/continuum
-ReadOnlyPaths=/etc/wireguard /etc/continuum
+# /etc/wireguard must be writable: the relay updates wg0.conf when peers
+# are added or removed via `continuum-relay peers add|remove`.
+ReadWritePaths=/var/log/continuum /etc/wireguard
+ReadOnlyPaths=/etc/continuum
 StandardOutput=append:/var/log/continuum/relay.log
 StandardError=append:/var/log/continuum/relay.log
 

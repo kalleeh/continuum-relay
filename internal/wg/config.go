@@ -29,6 +29,7 @@ type PeerConfig struct {
 	AllowedIPs          []string // e.g. ["10.100.0.2/32"]
 	Endpoint            string   // optional, e.g. "1.2.3.4:51820"
 	PersistentKeepalive int
+	PreSharedKey        string   // optional base64-encoded 32-byte preshared key (post-quantum layer)
 }
 
 // ParseFile reads and parses a WireGuard config file.
@@ -84,6 +85,9 @@ func ParseString(s string) (*Config, error) {
 				// Commit any pending peer.
 				if currentPeer != nil {
 					cfg.Peers = append(cfg.Peers, *currentPeer)
+				}
+				if len(cfg.Peers) >= maxWGPeers {
+					return nil, fmt.Errorf("wg config: too many peers (max %d)", maxWGPeers)
 				}
 				currentPeer = &PeerConfig{}
 				section = "peer"
@@ -179,7 +183,9 @@ func applyPeerKey(peer *PeerConfig, key, value string) error {
 			return fmt.Errorf("invalid PersistentKeepalive %q: %w", value, err)
 		}
 		peer.PersistentKeepalive = ka
-	// Unknown keys (PreSharedKey, etc.) are silently ignored.
+	case "presharedkey":
+		peer.PreSharedKey = value
+	// Unknown keys are silently ignored.
 	}
 	return nil
 }

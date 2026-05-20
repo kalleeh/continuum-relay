@@ -1,16 +1,18 @@
 package logging
 
 import (
+	"io"
 	"log/slog"
 	"os"
+
+	"golang.org/x/term"
 )
 
 const maxLogSize = 50 * 1024 * 1024 // 50 MB
 
 func Setup(logPath string) {
 	if logPath == "" || logPath == "stderr" {
-		// stderr: no rotation needed
-		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 		return
 	}
 
@@ -21,9 +23,16 @@ func Setup(logPath string) {
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
 	if err != nil {
-		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 		slog.Warn("could not open log file, using stderr", "path", logPath, "err", err)
 		return
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(f, nil)))
+
+	// If stderr is a terminal (interactive), write to both file and stderr.
+	// Otherwise (launchd/systemd), write to file only.
+	var w io.Writer = f
+	if term.IsTerminal(int(os.Stderr.Fd())) {
+		w = io.MultiWriter(f, os.Stderr)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
 }

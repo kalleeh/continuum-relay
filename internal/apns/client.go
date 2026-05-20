@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -53,11 +54,18 @@ func New(keyPath, keyID, teamID, bundleID string) (*Client, error) {
 		return nil, errors.New("APNs key is not an ECDSA key")
 	}
 	return &Client{
-		keyID:      keyID,
-		teamID:     teamID,
-		bundleID:   bundleID,
-		key:        key,
-		httpClient: &http.Client{},
+		keyID:    keyID,
+		teamID:   teamID,
+		bundleID: bundleID,
+		key:      key,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+				ForceAttemptHTTP2:     true,
+				ResponseHeaderTimeout: 10 * time.Second,
+			},
+		},
 	}, nil
 }
 
