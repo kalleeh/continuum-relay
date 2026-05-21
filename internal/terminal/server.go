@@ -210,6 +210,30 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// WebSocket ping/pong heartbeat — surfaces half-open sockets within ~30s.
+	// Mirrors the relay subsystem (internal/relay/client.go). Without this,
+	// an iOS client suspended in the background can hold a dead socket open
+	// indefinitely, leaving the user staring at a frozen terminal until they
+	// back out and re-enter the session.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
+				err := conn.Ping(pingCtx)
+				pingCancel()
+				if err != nil {
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// PTY output → WebSocket.
 	// Frames are prefixed with 0x30 to match the xterm.js/ttyd binary protocol.
 	go func() {
