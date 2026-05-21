@@ -323,14 +323,19 @@ if 'runcmd' not in config:
     config['runcmd'] = []
 
 config['runcmd'].extend([
+    # Write /etc/continuum/env (auth token + relay config). install.sh detects
+    # this file and takes its upgrade-only branch (download + verify + restart),
+    # so we keep the unit + env in write_files above and let install.sh own the
+    # binary install + checksum verification.
     'mkdir -p /etc/continuum /var/log/continuum',
     f"printf 'CONTINUUM_TOKEN=%s\\nCONTINUUM_RELAY_ADDR=10.100.0.1:7682\\nCONTINUUM_RELAY_LOG=/var/log/continuum/relay.log\\nOLLAMA_HOST=http://10.100.0.1:11434\\n' {shlex.quote(token)} > /etc/continuum/env",
     'chmod 600 /etc/continuum/env && chown ubuntu:ubuntu /etc/continuum/env',
     *([ f"sed -i '$ a OLLAMA_API_KEY={shlex.quote(ollama_key)}' /etc/continuum/env" ] if ollama_key else []),
-    'curl -fsSL -o /usr/local/bin/continuum-relay https://github.com/kalleeh/continuum-relay/releases/latest/download/continuum-relay-linux-amd64',
-    'RELAY_SUM=$(curl -sfL https://github.com/kalleeh/continuum-relay/releases/latest/download/checksums.txt | grep continuum-relay-linux-amd64 | awk \'{print $1}\') && [ -n "$RELAY_SUM" ] || { echo "ERROR: Could not fetch checksums" >&2; rm -f /usr/local/bin/continuum-relay; exit 1; } && echo "$RELAY_SUM  /usr/local/bin/continuum-relay" | sha256sum -c - || { echo "Checksum verification failed" >&2; rm -f /usr/local/bin/continuum-relay; exit 1; }',
-    'chmod +x /usr/local/bin/continuum-relay',
-    'systemctl enable continuum-relay && systemctl start continuum-relay',
+    # Reload systemd so it sees the unit written by write_files, enable for
+    # boot, then run install.sh which downloads + verifies + restarts.
+    'systemctl daemon-reload',
+    'systemctl enable continuum-relay',
+    'curl -fsSL https://raw.githubusercontent.com/kalleeh/continuum-relay/main/install.sh | sh',
     # Install Ollama and bind to WireGuard interface
     'curl -fsSL https://ollama.com/install.sh | sh',
     'mkdir -p /etc/systemd/system/ollama.service.d',
@@ -1673,46 +1678,18 @@ RELAY_SVC
 echo "==> Installing Continuum services..."
 mkdir -p /etc/continuum /var/log/continuum
 
+# Pre-seed /etc/continuum/env so install.sh detects an existing install
+# and runs only its binary download + checksum verification path.
 printf 'CONTINUUM_TOKEN=${CONTINUUM_TOKEN}\nCONTINUUM_RELAY_ADDR=10.100.0.1:7682\nCONTINUUM_RELAY_LOG=/var/log/continuum/relay.log\nOLLAMA_HOST=http://10.100.0.1:11434\n' \
   > /etc/continuum/env
 [[ -n "${OLLAMA_API_KEY:-}" ]] && echo "OLLAMA_API_KEY=${OLLAMA_API_KEY}" >> /etc/continuum/env
 chmod 600 /etc/continuum/env
 chown ${ssh_user}:${ssh_user} /etc/continuum/env 2>/dev/null || true
 
-echo "  Downloading continuum-relay..."
-curl -fsSL -o /usr/local/bin/continuum-relay \
-  https://github.com/kalleeh/continuum-relay/releases/latest/download/continuum-relay-linux-amd64
-echo "  Verifying checksum..."
-expected=\$(curl -sfL 'https://github.com/kalleeh/continuum-relay/releases/latest/download/checksums.txt' | grep 'continuum-relay-linux-amd64' | awk '{print \$1}')
-if [ -z "\$expected" ]; then
-  echo 'ERROR: Could not fetch checksums.txt from release — aborting for safety' >&2
-  rm -f /usr/local/bin/continuum-relay 2>/dev/null || true
-  exit 1
-fi
-actual=""
-if command -v sha256sum &>/dev/null; then
-  actual=\$(sha256sum /usr/local/bin/continuum-relay 2>/dev/null | awk '{print \$1}')
-elif command -v shasum &>/dev/null; then
-  actual=\$(shasum -a 256 /usr/local/bin/continuum-relay 2>/dev/null | awk '{print \$1}')
-fi
-if [ -z "\$actual" ]; then
-  echo 'ERROR: Failed to compute checksum' >&2
-  exit 1
-fi
-if [ "\$expected" != "\$actual" ]; then
-  echo 'ERROR: Checksum mismatch — binary may be corrupted or tampered' >&2
-  rm -f /usr/local/bin/continuum-relay
-  exit 1
-fi
-chmod +x /usr/local/bin/continuum-relay
-
+# Pre-seed systemd unit so install.sh can restart it after install.
 echo "${relay_b64}" | base64 -d > /etc/systemd/system/continuum-relay.service
-
 systemctl daemon-reload
 systemctl enable continuum-relay
-systemctl start continuum-relay
-
-ufw allow from 10.100.0.0/24 to any port 7682 proto tcp comment "Continuum relay (WireGuard only)"
 
 # Logrotate
 cat > /etc/logrotate.d/continuum << 'LR'
@@ -1727,6 +1704,11 @@ cat > /etc/logrotate.d/continuum << 'LR'
     endscript
 }
 LR
+
+echo "  Downloading and installing continuum-relay (via install.sh)..."
+curl -fsSL https://raw.githubusercontent.com/kalleeh/continuum-relay/main/install.sh | sh
+
+ufw allow from 10.100.0.0/24 to any port 7682 proto tcp comment "Continuum relay (WireGuard only)"
 SCRIPT_MOBILE
   fi
 
