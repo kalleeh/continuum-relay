@@ -12,6 +12,7 @@
 #
 # Env vars (all optional):
 #   CONTINUUM_VERSION       Pin a release, e.g. v0.4.0. Default: latest.
+#   CONTINUUM_YES=1         Skip the upgrade confirmation prompt.
 #   CONTINUUM_NO_RESTART=1  Upgrade only — skip the service restart.
 #   CONTINUUM_USER          Fresh install — system user the relay runs as.
 #                           Default: ubuntu | $SUDO_USER | console user.
@@ -123,7 +124,24 @@ restart_service() {
 # ── Upgrade mode ───────────────────────────────────────────────────────────
 
 if [ -f "$ENV_FILE" ]; then
-  echo "==> Existing install detected ($ENV_FILE) — upgrade only"
+  current=""
+  if [ -x "$DEST" ]; then
+    current="$("$DEST" --version 2>/dev/null || true)"
+  fi
+  echo "==> Existing install detected ($ENV_FILE)"
+  [ -n "$current" ] && echo "    Current: $current"
+  echo "    New:     $VERSION  ($ASSET)"
+
+  # Skip prompt when piped from cloud-init / non-interactive shells, or when
+  # CONTINUUM_YES=1 is set. /dev/tty is unavailable in those contexts.
+  if [ "${CONTINUUM_YES:-0}" != "1" ] && [ -r /dev/tty ]; then
+    printf "    Upgrade now? [Y/n] "
+    read -r reply </dev/tty || reply=""
+    case "$reply" in
+      n|N|no|NO) echo "==> Aborted"; exit 0 ;;
+    esac
+  fi
+
   download_binary
   restart_service
   echo "==> Upgrade complete"
