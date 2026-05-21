@@ -124,13 +124,37 @@ restart_service() {
 # ── Upgrade mode ───────────────────────────────────────────────────────────
 
 if [ -f "$ENV_FILE" ]; then
-  current=""
-  if [ -x "$DEST" ]; then
-    current="$("$DEST" --version 2>/dev/null || true)"
-  fi
   echo "==> Existing install detected ($ENV_FILE)"
-  [ -n "$current" ] && echo "    Current: $current"
-  echo "    New:     $VERSION  ($ASSET)"
+
+  # Compare the installed binary's SHA-256 against the target release's
+  # checksum. The binary has no --version flag, so checksums are the
+  # cheapest reliable identifier.
+  installed_sum=""
+  if [ -x "$DEST" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      installed_sum="$(sha256sum "$DEST" | awk '{print $1}')"
+    else
+      installed_sum="$(shasum -a 256 "$DEST" | awk '{print $1}')"
+    fi
+  fi
+
+  target_sum="$(curl -fsSL "${BASE}/checksums.txt" 2>/dev/null | awk -v f="$ASSET" '$2==f || $2=="./"f {print $1; exit}')"
+  if [ -z "$target_sum" ]; then
+    echo "ERROR: could not fetch ${BASE}/checksums.txt — aborting" >&2
+    exit 1
+  fi
+
+  if [ -n "$installed_sum" ]; then
+    echo "    Installed sha256: $installed_sum"
+  else
+    echo "    Installed: (binary not present)"
+  fi
+  echo "    Target    sha256: $target_sum"
+
+  if [ -n "$installed_sum" ] && [ "$installed_sum" = "$target_sum" ]; then
+    echo "==> Already on target version — nothing to do"
+    exit 0
+  fi
 
   # Skip prompt when piped from cloud-init / non-interactive shells, or when
   # CONTINUUM_YES=1 is set. /dev/tty is unavailable in those contexts.
