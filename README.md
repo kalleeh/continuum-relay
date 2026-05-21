@@ -182,20 +182,36 @@ same `CGO_ENABLED=0`.
 
 ## Releases
 
-Releases are cut by `.github/workflows/release.yml`, triggered on `v*`
-tag pushes. The workflow:
+`install.sh` and `deploy.sh` always pull from
+`https://github.com/kalleeh/continuum-relay/releases/latest`. **Pushing
+to `main` does not ship a fix** — users keep getting the previously-
+tagged binary until you cut a new tag. If a server reports "already on
+the right version" after you pushed a fix, that's why.
 
-1. Cross-builds all four binaries via `make release`.
-2. Refreshes `checksums.txt` to cover binaries + `deploy.sh` + `cloud-init.yaml`.
-3. Publishes a GitHub Release with all assets attached.
-
-The workflow runs in this same repo, so it uses the per-job
-`GITHUB_TOKEN` and needs no cross-repo PAT.
+To ship: pick the next semver after `gh release view --json tagName`
+and push the tag.
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+# 1. Push your fix to main first
+git push origin main
+
+# 2. Tag the commit you want released and push the tag
+git tag v0.4.1
+git push origin v0.4.1
+
+# 3. Watch the workflow finish (~1m20s)
+gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
+
+The `.github/workflows/release.yml` workflow fires on `v*` tag push,
+runs in this repo (so the per-job `GITHUB_TOKEN` is enough — no cross-
+repo PAT), cross-builds the four binaries via `make release`, refreshes
+`checksums.txt` over binaries + `deploy.sh` + `cloud-init.yaml`, and
+publishes a GitHub Release with everything attached.
+
+After the release lands, the iOS submodule pin should be bumped — see
+[CLAUDE.md "Release Process"](https://github.com/kalleeh/continuum-ios)
+in the iOS repo for that step.
 
 ## License
 
