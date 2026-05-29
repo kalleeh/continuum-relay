@@ -10,12 +10,14 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -145,7 +147,23 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 	// when the client disconnects, closing the PTY master sends SIGHUP to the
 	// foreground process (tmux), which causes tmux to detach — preserving the
 	// session — rather than dying. The next WebSocket connection will re-attach.
-	cmd := exec.Command(s.command[0], s.command[1:]...)
+	//
+	// On Linux, wrap the spawn in `systemd-run --user --scope` so the PTY (and
+	// tmux + every child) lands in the user manager's cgroup rather than this
+	// service's. Without this, an `unattended-upgrades` → needrestart restart
+	// of continuum-relay.service tears down the entire cgroup and kills every
+	// active session. Placing PTYs in `user@<uid>.service` insulates them from
+	// relay restarts entirely.
+	//
+	// The wrapper also clears AmbientCapabilities and CapabilityBoundingSet, so
+	// children no longer inherit CAP_NET_ADMIN from the unit's
+	// AmbientCapabilities= setting (which is needed by the relay's wireguard-go
+	// TUN setup but has no business being in tmux/claude/MCPs).
+	//
+	// Disable with CONTINUUM_NO_USER_SCOPE=1 (e.g. for dev environments where
+	// the user manager isn't running). On macOS the relay is a LaunchDaemon
+	// and PTY children are already isolated via setsid/launchd's own model.
+	cmd := buildPTYCommand(s.command)
 	env := os.Environ()
 	hasTerm := false
 	for _, e := range env {
@@ -192,6 +210,15 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 					cmd.SysProcAttr = &syscall.SysProcAttr{
 						Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
 					}
+				}
+				// `systemd-run --user` needs to reach the user manager's bus
+				// socket. The relay's systemd unit has PrivateTmp=yes which
+				// hides /run/user/<uid> from a default $TMPDIR view, but
+				// XDG_RUNTIME_DIR points to the real path on the host and
+				// systemd resolves it directly. Set it explicitly because
+				// the relay's environment may not have it.
+				if !envHas(env, "XDG_RUNTIME_DIR") {
+					env = append(env, fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid))
 				}
 			}
 		}
@@ -310,4 +337,53 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 	}
 
 	slog.Info("terminal client disconnected", "cmd", s.command[0], "duration", time.Since(connectedAt).Round(time.Millisecond))
+}
+
+// buildPTYCommand returns the exec.Cmd that starts the user's shell for a
+// PTY session. On Linux it wraps the command in `systemd-run --user --scope`
+// so the spawned tmux + children land in user@<uid>.service's cgroup, not
+// continuum-relay.service's; that lets sessions survive `systemctl restart
+// continuum-relay` (e.g. needrestart-driven library upgrades). The wrapper
+// also clears AmbientCapabilities/CapabilityBoundingSet so children do not
+// inherit CAP_NET_ADMIN from the relay unit.
+//
+// Falls back to plain exec.Command when:
+//   - GOOS != linux (macOS LaunchDaemon path: launchd already isolates per-job)
+//   - CONTINUUM_NO_USER_SCOPE=1 (escape hatch for dev/test)
+//   - systemd-run is not on PATH
+//
+// If `--user --scope` itself fails at exec time (no user manager running, no
+// linger configured), the PTY simply fails to start and the WebSocket gets
+// a 500. Operators can either enable linger (`loginctl enable-linger ubuntu`)
+// or set CONTINUUM_NO_USER_SCOPE=1.
+func buildPTYCommand(command []string) *exec.Cmd {
+	if runtime.GOOS != "linux" || os.Getenv("CONTINUUM_NO_USER_SCOPE") == "1" {
+		return exec.Command(command[0], command[1:]...)
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		return exec.Command(command[0], command[1:]...)
+	}
+	args := []string{
+		"--user",
+		"--scope",
+		"--quiet",
+		"--collect", // garbage-collect the transient scope when it exits
+		"--property=AmbientCapabilities=",
+		"--property=CapabilityBoundingSet=",
+		"--property=NoNewPrivileges=yes",
+		"--",
+	}
+	args = append(args, command...)
+	return exec.Command("systemd-run", args...)
+}
+
+// envHas reports whether env contains a "KEY=" entry (any value).
+func envHas(env []string, key string) bool {
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return true
+		}
+	}
+	return false
 }
