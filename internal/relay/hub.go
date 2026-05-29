@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,6 +55,12 @@ func (h *Hub) ListSessions() []SessionRecord {
 	return records
 }
 
+// legacySessionRe matches iOS-app-generated tmux session names in the
+// pre-cx- scheme: <type>-<digits>, e.g. "claudeCode-6195", "terminal-6738".
+// This is safe to use for discovery because the random suffix makes collisions
+// with personal sessions like "hermes" or "main" extremely unlikely.
+var legacySessionRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]+-\d+$`)
+
 // discoverTmuxSessions runs `tmux list-sessions` and returns records for
 // sessions not managed by the relay. These are marked with Source="system".
 func discoverTmuxSessions() []SessionRecord {
@@ -85,16 +92,23 @@ func discoverTmuxSessions() []SessionRecord {
 			continue
 		}
 		name := parts[0]
-		// Only surface relay-managed sessions (prefixed "cx-"); skip all others
-		// (e.g. the user's own "hermes", "main" sessions) to avoid confusion and
-		// to prevent the iOS app from re-attaching to a session it didn't create.
-		if !strings.HasPrefix(name, "cx-") {
+		// Surface relay-managed sessions only. Two naming schemes are supported:
+		//   1. cx-<type> prefix — used after the iOS app is rebuilt with cx- prefix
+		//   2. <type>-<digits> pattern — legacy scheme used by current iOS app
+		//      (e.g. claudeCode-6195, terminal-6738); safe to surface because the
+		//      random suffix makes collisions with user sessions extremely unlikely.
+		// User sessions like "hermes" and "main" are excluded by both checks.
+		isCxPrefixed := strings.HasPrefix(name, "cx-")
+		isLegacyNamed := legacySessionRe.MatchString(name)
+		if !isCxPrefixed && !isLegacyNamed {
 			continue
 		}
-		// Strip the "cx-" prefix before returning to the client so the app sees
-		// the logical name (e.g. "terminal") rather than the internal tmux name.
-		name = strings.TrimPrefix(name, "cx-")
-		// Skip sessions with names that don't pass validation (numbered junk, etc.)
+		if isCxPrefixed {
+			// Strip the "cx-" prefix before returning to the client so the app sees
+			// the logical name (e.g. "terminal") rather than the internal tmux name.
+			name = strings.TrimPrefix(name, "cx-")
+		}
+		// Skip sessions with names that don't pass validation (too long, etc.)
 		if len(name) > 64 {
 			continue
 		}
