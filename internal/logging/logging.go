@@ -11,8 +11,14 @@ import (
 const maxLogSize = 50 * 1024 * 1024 // 50 MB
 
 func Setup(logPath string) {
+	level := slog.LevelInfo
+	if os.Getenv("CONTINUUM_LOG_DEBUG") == "1" {
+		level = slog.LevelDebug
+	}
+	opts := &slog.HandlerOptions{Level: level}
+
 	if logPath == "" || logPath == "stderr" {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
 		return
 	}
 
@@ -23,7 +29,7 @@ func Setup(logPath string) {
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
 	if err != nil {
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
 		slog.Warn("could not open log file, using stderr", "path", logPath, "err", err)
 		return
 	}
@@ -34,5 +40,5 @@ func Setup(logPath string) {
 	if term.IsTerminal(int(os.Stderr.Fd())) {
 		w = io.MultiWriter(f, os.Stderr)
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, opts)))
 }
