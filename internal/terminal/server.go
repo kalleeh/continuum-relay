@@ -103,7 +103,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(1 << 20) // 1MB per message
 
 	slog.Info("terminal client connected", "ip", r.RemoteAddr)
-	s.handleConn(r.Context(), conn)
+	s.handleConn(r.Context(), conn, r.RemoteAddr)
 }
 
 // checkAuth validates the Authorization: Basic header.
@@ -132,7 +132,7 @@ func (s *Server) checkAuth(r *http.Request) bool {
 //	Client → Server:
 //	  [0x30] + keystroke bytes       (stdin to PTY)
 //	  [0x31] + JSON {"columns":N,"rows":N}  (resize PTY)
-func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
+func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAddr string) {
 	defer conn.CloseNow()
 
 	// Spawn the command with a PTY at the default 80x24 size.
@@ -140,7 +140,12 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
 	// runs as a systemd service with a minimal environment where TERM is
 	// typically unset, which causes tmux to fail with "terminal does not
 	// support clear".
-	cmd := exec.CommandContext(ctx, s.command[0], s.command[1:]...)
+	// Use exec.Command (not exec.CommandContext) so the PTY process is NOT killed
+	// when the WebSocket context is cancelled. This is the key to session persistence:
+	// when the client disconnects, closing the PTY master sends SIGHUP to the
+	// foreground process (tmux), which causes tmux to detach — preserving the
+	// session — rather than dying. The next WebSocket connection will re-attach.
+	cmd := exec.Command(s.command[0], s.command[1:]...)
 	env := os.Environ()
 	hasTerm := false
 	for _, e := range env {
@@ -200,10 +205,10 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
 		return
 	}
 	defer func() {
+		// Close the PTY master — this sends SIGHUP to the foreground process (tmux),
+		// which causes tmux to detach cleanly and preserves the session for re-attach.
+		// Do NOT call cmd.Process.Kill() here: that would destroy the tmux session.
 		ptmx.Close()
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
 		cmd.Wait() //nolint:errcheck
 	}()
 
@@ -256,6 +261,8 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
 	}()
 
 	// WebSocket input → PTY stdin (main loop).
+	connectedAt := time.Now()
+	stdinLogged := false // set once we've seen a non-empty stdin line (the tmux command)
 	for {
 		_, msg, err := conn.Read(ctx)
 		if err != nil {
@@ -267,6 +274,18 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
 		switch msg[0] {
 		case 0x30: // stdin data
 			if len(msg) > 1 {
+				// Log stdin messages until we capture the first real command (ends in \r).
+				// This lets us see exactly what the iOS app types into the shell on connect.
+				if !stdinLogged {
+					preview := strings.TrimRight(string(msg[1:]), "\r\n")
+					if len(preview) > 0 {
+						stdinLogged = true
+						if len(preview) > 300 {
+							preview = preview[:300] + "…"
+						}
+						slog.Debug("terminal stdin cmd", "ip", remoteAddr, "data", preview)
+					}
+				}
 				ptmx.Write(msg[1:]) //nolint:errcheck
 			}
 		case 0x31: // resize request
@@ -290,5 +309,5 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn) {
 		}
 	}
 
-	slog.Info("terminal client disconnected", "cmd", s.command[0])
+	slog.Info("terminal client disconnected", "cmd", s.command[0], "duration", time.Since(connectedAt).Round(time.Millisecond))
 }
