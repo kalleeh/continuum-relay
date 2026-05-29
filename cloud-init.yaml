@@ -191,6 +191,13 @@ runcmd:
   - chown -R ubuntu:ubuntu /home/ubuntu/.config
   - chown -R ubuntu:ubuntu /home/ubuntu/projects
 
+  # -- Enable user-manager linger so user@1000.service runs without an active --
+  # -- login. The relay spawns PTYs via `systemd-run --user --scope` so       --
+  # -- sessions live in the user manager's cgroup and survive relay restart;  --
+  # -- without linger, the user manager exits when ssh closes and the next    --
+  # -- PTY spawn fails until someone logs in interactively.                   --
+  - loginctl enable-linger ubuntu
+
   # -- Node.js LTS via fnm --
   - su - ubuntu -c 'curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir ~/.local/bin --skip-shell'
   - su - ubuntu -c '~/.local/bin/fnm install --lts'

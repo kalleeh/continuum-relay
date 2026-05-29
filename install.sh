@@ -101,12 +101,31 @@ download_binary() {
   fi
 }
 
+enable_linger() {
+  # The relay spawns PTYs via `systemd-run --user --scope` so sessions land
+  # in the user manager's cgroup and survive a relay restart. That requires
+  # the user manager to be running without an active login — i.e. linger.
+  # Idempotent: loginctl returns 0 even if linger is already enabled.
+  if ! command -v loginctl >/dev/null 2>&1; then
+    return
+  fi
+  user="${SUDO_USER:-${CONTINUUM_USER:-ubuntu}}"
+  if ! id "$user" >/dev/null 2>&1; then
+    return
+  fi
+  if ! loginctl show-user "$user" 2>/dev/null | grep -q '^Linger=yes'; then
+    echo "==> Enabling systemd linger for $user (so PTY sessions survive relay restart)"
+    loginctl enable-linger "$user" 2>/dev/null || true
+  fi
+}
+
 restart_service() {
   if [ "${CONTINUUM_NO_RESTART:-0}" = "1" ]; then
     echo "==> Skipping restart (CONTINUUM_NO_RESTART=1)"
     return
   fi
   if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files continuum-relay.service >/dev/null 2>&1; then
+    enable_linger
     echo "==> Restarting continuum-relay.service"
     systemctl restart continuum-relay
     systemctl is-active continuum-relay
