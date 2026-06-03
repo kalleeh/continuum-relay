@@ -43,11 +43,63 @@ func (w *wgNetstack) listenTCP(addr string) (net.Listener, error) {
 	return w.net.ListenTCPAddrPort(netip.AddrPortFrom(netip.MustParseAddr("10.100.0.1"), uint16(port)))
 }
 
+// command is a resolved top-level CLI verb.
+type command int
+
+const (
+	cmdServe    command = iota // run the long-running relay server (default / "serve")
+	cmdPeers                   // manage WireGuard peers against the running relay
+	cmdStatus                  // print relay health + session count (read-only HTTP)
+	cmdSessions                // list sessions known to the running relay (read-only HTTP)
+	cmdHelp                    // print usage
+	cmdUnknown                 // unrecognized verb — must NOT boot the server
+)
+
+// resolveCommand maps os.Args to a command. The crucial guarantee: only a bare
+// invocation or an explicit "serve" returns cmdServe. Every unrecognized
+// argument returns cmdUnknown so it can be rejected — never silently falling
+// through to start a second WireGuard tunnel against a wg0 the systemd service
+// already owns (which fails with "device or resource busy" and looks like a crash).
+func resolveCommand(args []string) command {
+	if len(args) < 2 {
+		return cmdServe
+	}
+	switch args[1] {
+	case "serve":
+		return cmdServe
+	case "peers":
+		return cmdPeers
+	case "status":
+		return cmdStatus
+	case "sessions":
+		return cmdSessions
+	case "help", "-h", "--help":
+		return cmdHelp
+	default:
+		return cmdUnknown
+	}
+}
+
 func main() {
-	// ── CLI subcommand: peers ─────────────────────────────────────────────────
-	if len(os.Args) > 1 && os.Args[1] == "peers" {
+	switch resolveCommand(os.Args) {
+	case cmdPeers:
 		runPeersCLI(os.Args[2:])
 		return
+	case cmdStatus:
+		runStatusCLI()
+		return
+	case cmdSessions:
+		runSessionsCLI()
+		return
+	case cmdHelp:
+		printUsage(os.Stdout)
+		return
+	case cmdUnknown:
+		fmt.Fprintf(os.Stderr, "continuum-relay: unknown command %q\n\n", os.Args[1])
+		printUsage(os.Stderr)
+		os.Exit(2)
+	case cmdServe:
+		// fall through to the server boot below
 	}
 
 	token := os.Getenv("CONTINUUM_TOKEN")
@@ -216,11 +268,19 @@ func buildAPNSClient() *apns.Client {
 
 // ── Peers CLI subcommand ─────────────────────────────────────────────────────
 
-func runPeersCLI(args []string) {
+// relayAddr returns the relay's API address (CONTINUUM_RELAY_ADDR or the default).
+func relayAddr() string {
 	addr := os.Getenv("CONTINUUM_RELAY_ADDR")
 	if addr == "" {
 		addr = "10.100.0.1:7682"
 	}
+	return addr
+}
+
+// loadToken resolves the auth token from the environment, falling back to the
+// deploy-time env file. Exits with a clear error if neither has it — every CLI
+// command that talks to the running relay needs it.
+func loadToken() string {
 	token := os.Getenv("CONTINUUM_TOKEN")
 	if token == "" {
 		// Try reading from env file.
@@ -237,6 +297,75 @@ func runPeersCLI(args []string) {
 		fmt.Fprintln(os.Stderr, "error: CONTINUUM_TOKEN not set and not found in /etc/continuum/env")
 		os.Exit(1)
 	}
+	return token
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: continuum-relay [command]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  serve              Run the relay server (default when no command is given)")
+	fmt.Fprintln(w, "  status             Show relay health and session count")
+	fmt.Fprintln(w, "  sessions           List sessions known to the running relay")
+	fmt.Fprintln(w, "  peers <subcommand> Manage WireGuard peers (list, add, remove)")
+	fmt.Fprintln(w, "  help               Show this help")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "status, sessions, and peers query the already-running relay over HTTP.")
+	fmt.Fprintln(w, "Only `serve` (or no command) starts the server — use systemctl to manage it.")
+}
+
+// runStatusCLI queries the running relay's /health and /api/sessions endpoints
+// and prints a one-line health summary. It never starts a server.
+func runStatusCLI() {
+	addr := relayAddr()
+	token := loadToken()
+
+	if _, err := apiRequest("GET", "http://"+addr+"/health", token, nil); err != nil {
+		fmt.Printf("relay: DOWN (%v)\n", err)
+		os.Exit(1)
+	}
+	resp, err := apiRequest("GET", "http://"+addr+"/api/sessions", token, nil)
+	if err != nil {
+		fmt.Printf("relay: UP at %s, but session query failed: %v\n", addr, err)
+		os.Exit(1)
+	}
+	var sessions []relay.SessionRecord
+	if err := json.Unmarshal(resp, &sessions); err != nil {
+		fmt.Printf("relay: UP at %s (could not parse session list: %v)\n", addr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("relay: UP at %s — %d session(s)\n", addr, len(sessions))
+}
+
+// runSessionsCLI prints the relay's current sessions in a table. It never starts
+// a server — it queries the running relay's /api/sessions endpoint.
+func runSessionsCLI() {
+	addr := relayAddr()
+	token := loadToken()
+
+	resp, err := apiRequest("GET", "http://"+addr+"/api/sessions", token, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	var sessions []relay.SessionRecord
+	if err := json.Unmarshal(resp, &sessions); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+	if len(sessions) == 0 {
+		fmt.Println("No sessions.")
+		return
+	}
+	fmt.Printf("%-24s %-12s %-10s %-8s %s\n", "NAME", "TYPE", "STATUS", "SOURCE", "PROJECT")
+	for _, s := range sessions {
+		fmt.Printf("%-24s %-12s %-10s %-8s %s\n", s.Name, s.Type, s.Status, s.Source, s.Project)
+	}
+}
+
+func runPeersCLI(args []string) {
+	addr := relayAddr()
+	token := loadToken()
 
 	baseURL := "http://" + addr + "/api/peers"
 

@@ -14,12 +14,19 @@ submodule at `server/continuum-relay/`.
   on macOS where TUN devices need extra entitlements.
 - **Terminal server** — replaces `ttyd`; speaks the xterm.js binary WebSocket
   protocol that the iOS app's `TerminalAdapter` connects to.
-- **Claude Code relay** — multiplexes `claude --output-format stream-json`
-  sessions so the iOS app can reconnect mid-session and replay output.
+- **Claude Code relay** — tracks tmux-backed sessions and pushes the session
+  list (`session_list`), tool-permission prompts, and project events to the iOS
+  app over WebSocket. Claude Code itself runs as a TUI inside tmux; its output
+  flows over the terminal subsystem as raw VT100 bytes (the old
+  `claude --output-format stream-json` multiplexing was removed in 2026-05).
 - **Bedrock chat proxy** — forwards Ollama-shaped requests to AWS Bedrock,
   used by the in-app chat feature.
 - **Peers CLI** — `continuum-relay peers add|list|remove` rewrites
   `/etc/wireguard/wg0.conf` and reloads the live tunnel without a restart.
+- **Status CLI** — `continuum-relay status` and `continuum-relay sessions`
+  query the *already-running* relay over HTTP (`/health`, `/api/sessions`).
+  They never start a second server, so they are safe to run alongside the
+  systemd service.
 - **APNs push** — optional push notifications when a Claude Code session
   finishes its turn.
 
@@ -102,6 +109,24 @@ And run:
 ```bash
 sudo continuum-relay   # needs root or CAP_NET_ADMIN to create the TUN
 ```
+
+## Commands
+
+```
+continuum-relay [command]
+
+  serve              Run the relay server (default when no command is given)
+  status             Show relay health and session count
+  sessions           List sessions known to the running relay
+  peers <subcommand> Manage WireGuard peers (list, add, remove)
+  help               Show this help
+```
+
+Only `serve` (or no command at all) starts the server. `status`, `sessions`,
+and `peers` are thin clients that talk to the already-running relay over HTTP —
+they do **not** boot a second instance. An unrecognized command exits non-zero
+with usage rather than falling through to a server start (which would otherwise
+fail trying to grab the `wg0` TUN device the systemd service already owns).
 
 ## Configuration
 

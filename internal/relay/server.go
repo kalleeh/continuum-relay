@@ -55,6 +55,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/permission", s.handlePermissionResponse)
 	mux.HandleFunc("/api/peers", s.handlePeers)
 	mux.HandleFunc("/api/info", s.handleInfo)
+	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -135,6 +136,22 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 
 	s.broker.Respond(req.ID, req.Allow)
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleSessions exposes the relay's current session list over HTTP (read-only).
+// This is what the `continuum-relay sessions` CLI queries, so checking sessions
+// never has to spawn a second relay process.
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.ValidateRequest(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.hub.ListSessions())
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
