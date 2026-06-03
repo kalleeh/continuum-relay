@@ -8,8 +8,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
 	"sync"
+	"time"
 
 	"nhooyr.io/websocket"
 
@@ -248,6 +248,23 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				continue
 			}
 			writeJSON(ctx, conn, map[string]string{"type": "project_removed", "name": msg.Name})
+
+		case "project_status":
+			st, err := projects.ProjectStatus(msg.Name)
+			if err != nil {
+				writeError(ctx, conn, "status_failed", err.Error())
+				continue
+			}
+			writeJSON(ctx, conn, map[string]any{
+				"type":        "project_status_result",
+				"name":        st.Name,
+				"isRepo":      st.IsRepo,
+				"clean":       st.Clean,
+				"uncommitted": st.Uncommitted,
+				"untracked":   st.Untracked,
+				"stashes":     st.Stashes,
+				"unpushed":    st.Unpushed,
+			})
 
 		case "tool_permission_response":
 			if msg.ID != "" {
