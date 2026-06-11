@@ -26,12 +26,12 @@ func writeConf(t *testing.T, content string) string {
 // expected live-update sequence happened (or didn't happen) around a conf
 // rewrite.
 type fakeLiveDevice struct {
-	mu       sync.Mutex
-	added    []string // public keys passed to AddPeer
-	removed  []string // public keys passed to RemovePeer
-	addErr   error    // returned from AddPeer if non-nil
-	rmErr    error    // returned from RemovePeer if non-nil
-	allowed  []string // CIDR passed alongside last AddPeer
+	mu      sync.Mutex
+	added   []string // public keys passed to AddPeer
+	removed []string // public keys passed to RemovePeer
+	addErr  error    // returned from AddPeer if non-nil
+	rmErr   error    // returned from RemovePeer if non-nil
+	allowed []string // CIDR passed alongside last AddPeer
 }
 
 func (f *fakeLiveDevice) AddPeer(pubKey, allowedCIDR string) error {
@@ -282,5 +282,22 @@ func TestAdd_RollsBackOnLiveFailure(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	if strings.Contains(string(raw), "[Peer]") {
 		t.Errorf("conf was written despite live Add failure:\n%s", raw)
+	}
+}
+
+// shortKey must not panic on keys shorter than the truncation length — a
+// hand-edited wg0.conf can carry a malformed PublicKey that Remove() logs.
+func TestShortKey(t *testing.T) {
+	cases := map[string]string{
+		"":                      "",
+		"abc":                   "abc",
+		"12345678901234567890":  "12345678901234567890", // exactly 20, no ellipsis
+		"123456789012345678901": "12345678901234567890…",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=": "AAAAAAAAAAAAAAAAAAAA…",
+	}
+	for in, want := range cases {
+		if got := shortKey(in); got != want {
+			t.Errorf("shortKey(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

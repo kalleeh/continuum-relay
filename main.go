@@ -441,14 +441,26 @@ func runPeersCLI(args []string) {
 		}
 		fmt.Printf("Removed peer #%d.\n", idx)
 
+	case "help", "-h", "--help":
+		printPeersUsage(os.Stdout)
+
 	default:
-		fmt.Println("Usage: continuum-relay peers <command>")
-		fmt.Println("")
-		fmt.Println("Commands:")
-		fmt.Println("  list          Show all configured peers")
-		fmt.Println("  add [name]    Add a new peer and show QR payload")
-		fmt.Println("  remove <num>  Remove peer by index")
+		// Unknown subcommand: usage to stderr, exit 2 — mirrors the top-level
+		// no-fallthrough guarantee so a typo (e.g. `peers remov`) fails loudly
+		// instead of looking like success to a script.
+		fmt.Fprintf(os.Stderr, "error: unknown peers subcommand %q\n\n", cmd)
+		printPeersUsage(os.Stderr)
+		os.Exit(2)
 	}
+}
+
+func printPeersUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: continuum-relay peers <command>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  list          Show all configured peers")
+	fmt.Fprintln(w, "  add [name]    Add a new peer and show QR payload")
+	fmt.Fprintln(w, "  remove <num>  Remove peer by index")
 }
 
 func apiRequest(method, url, token string, body []byte) ([]byte, error) {
@@ -472,7 +484,10 @@ func apiRequest(method, url, token string, body []byte) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
@@ -480,12 +495,25 @@ func apiRequest(method, url, token string, body []byte) ([]byte, error) {
 }
 
 func discoverPublicIP() string {
+	const fallback = "0.0.0.0"
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("https://ifconfig.me")
 	if err != nil {
-		return "0.0.0.0"
+		return fallback
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	return strings.TrimSpace(string(data))
+	// A non-200 (e.g. an ifconfig.me 429 error page) would otherwise be parsed
+	// as the IP and baked into every QR payload's wgServerEndpoint.
+	if resp.StatusCode != http.StatusOK {
+		return fallback
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fallback
+	}
+	ip := strings.TrimSpace(string(data))
+	if net.ParseIP(ip) == nil {
+		return fallback
+	}
+	return ip
 }

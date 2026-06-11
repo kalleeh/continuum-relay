@@ -29,9 +29,9 @@ type Client struct {
 	key        *ecdsa.PrivateKey
 	httpClient *http.Client
 
-	mu       sync.Mutex
-	jwt      string
-	jwtExp   time.Time
+	mu     sync.Mutex
+	jwt    string
+	jwtExp time.Time
 }
 
 // New parses the p8 key file and returns a ready-to-use Client.
@@ -114,9 +114,23 @@ func (c *Client) Send(deviceToken, title, body, sessionID string) error {
 			Reason string `json:"reason"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		// 403 ExpiredProviderToken means the cached JWT is no longer accepted
+		// (typically clock skew eating the 55-min margin). Drop the cache so the
+		// next Send rebuilds a fresh token instead of failing for up to 55 min.
+		if resp.StatusCode == http.StatusForbidden {
+			c.invalidateJWT()
+		}
 		return fmt.Errorf("APNs returned %d: %s", resp.StatusCode, errResp.Reason)
 	}
 	return nil
+}
+
+// invalidateJWT clears the cached token so the next getJWT rebuilds it.
+func (c *Client) invalidateJWT() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.jwt = ""
+	c.jwtExp = time.Time{}
 }
 
 // getJWT returns a cached JWT, rebuilding it if it has expired.

@@ -34,7 +34,7 @@ type Peer struct {
 
 // AddResult is returned after successfully adding a peer.
 type AddResult struct {
-	Peer    Peer   `json:"peer"`
+	Peer      Peer            `json:"peer"`
 	QRPayload json.RawMessage `json:"qrPayload"`
 }
 
@@ -168,7 +168,7 @@ func (m *Manager) Add(name string) (*AddResult, error) {
 		if m.device != nil {
 			if rmErr := m.device.RemovePeer(pubKey); rmErr != nil {
 				slog.Error("rollback failed: peer is live but not in config",
-					"err", rmErr, "pubkey", pubKey[:20]+"…")
+					"err", rmErr, "pubkey", shortKey(pubKey))
 			}
 		}
 		return nil, fmt.Errorf("write config: %w", err)
@@ -199,7 +199,7 @@ func (m *Manager) Add(name string) (*AddResult, error) {
 		return nil, fmt.Errorf("marshal qr payload: %w", err)
 	}
 
-	slog.Info("peer added", "name", name, "ip", clientIP, "pubkey", pubKey[:20]+"…")
+	slog.Info("peer added", "name", name, "ip", clientIP, "pubkey", shortKey(pubKey))
 
 	return &AddResult{
 		Peer: Peer{
@@ -247,11 +247,11 @@ func (m *Manager) Remove(index int) error {
 		// loudly and surface the error so the operator can manually clean
 		// up the conf file before the next restart.
 		slog.Error("conf rewrite failed after live revoke; peer is revoked but will reappear on restart",
-			"err", err, "pubkey", peer.PublicKey[:20]+"…")
+			"err", err, "pubkey", shortKey(peer.PublicKey))
 		return fmt.Errorf("rewrite config (peer revoked live but conf inconsistent): %w", err)
 	}
 
-	slog.Info("peer removed", "index", index, "pubkey", peer.PublicKey[:20]+"…")
+	slog.Info("peer removed", "index", index, "pubkey", shortKey(peer.PublicKey))
 	return nil
 }
 
@@ -309,7 +309,24 @@ func (m *Manager) rewriteWithout(removeIdx int) error {
 	peerIdx := removeIdx + 1
 	parts = append(parts[:peerIdx], parts[peerIdx+1:]...)
 
-	return os.WriteFile(m.confPath, []byte(strings.Join(parts, "")), 0600)
+	// Write atomically: a crash mid-write to confPath would leave a truncated
+	// wg0.conf, and the relay fails to come up on restart (wg.ParseFile errors).
+	// Write to a sibling temp file, then rename over the original.
+	tmp := m.confPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(parts, "")), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, m.confPath)
+}
+
+// shortKey truncates a key for logging without panicking on short input.
+// Keys from generateKeyPair are always 44 chars, but PublicKey values read
+// back from a hand-edited wg0.conf may be shorter, and Remove() logs them.
+func shortKey(k string) string {
+	if len(k) > 20 {
+		return k[:20] + "…"
+	}
+	return k
 }
 
 func (m *Manager) serverPublicKey(cfg *wg.Config) (string, error) {
