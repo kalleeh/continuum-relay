@@ -2,7 +2,6 @@ package projects
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,12 +33,9 @@ type ProjectGitStatus struct {
 // ProjectStatus inspects ~/projects/<name> and reports its git state.
 // Validates the name and guards against path traversal, mirroring RemoveProject.
 func ProjectStatus(name string) (ProjectGitStatus, error) {
-	if !nameRe.MatchString(name) {
-		return ProjectGitStatus{}, fmt.Errorf("invalid project name: must match [a-zA-Z0-9_.-]+")
-	}
-	target := filepath.Join(ProjectsDir(), name)
-	if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(ProjectsDir())) {
-		return ProjectGitStatus{}, fmt.Errorf("path traversal rejected")
+	target, err := projectPath(name)
+	if err != nil {
+		return ProjectGitStatus{}, err
 	}
 	st, err := projectStatusAt(target)
 	st.Name = name

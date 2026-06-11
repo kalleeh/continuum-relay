@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,6 +36,7 @@ type ClientMessage struct {
 	Allow       bool   `json:"allow,omitempty"`        // tool_permission_response
 	Token       string `json:"token,omitempty"`        // rotate_token
 	DeviceToken string `json:"device_token,omitempty"` // register_device
+	Force       bool   `json:"force,omitempty"`        // remove_project: delete even with unsaved work
 }
 
 func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, broker *PermissionBroker, clientID string) {
@@ -243,8 +245,14 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			}()
 
 		case "remove_project":
-			if err := projects.RemoveProject(msg.Name); err != nil {
-				writeError(ctx, conn, "remove_failed", err.Error())
+			if err := projects.RemoveProject(msg.Name, msg.Force); err != nil {
+				// Distinct code for the recoverable "has unsaved work" case so
+				// the client can offer a force-retry instead of a hard failure.
+				code := "remove_failed"
+				if errors.Is(err, projects.ErrUnsavedWork) {
+					code = "remove_needs_force"
+				}
+				writeError(ctx, conn, code, err.Error())
 				continue
 			}
 			writeJSON(ctx, conn, map[string]string{"type": "project_removed", "name": msg.Name})

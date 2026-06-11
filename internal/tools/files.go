@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 const (
@@ -127,10 +128,24 @@ func executeWriteFile(path, content string) ToolResult {
 	if len(content) > maxWriteBytes {
 		return ToolResult{Name: "write_file", Error: "content exceeds 100KB limit"}
 	}
+	// Reject a symlink at the target, mirroring the read path. Without this a
+	// pre-planted symlink (e.g. ~/notes.txt -> ~/.ssh/authorized_keys) passes
+	// the prefix/sensitive-pattern checks on its own innocuous path string, and
+	// os.WriteFile would follow it and clobber the real target.
+	if info, err := os.Lstat(resolved); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return ToolResult{Name: "write_file", Error: "symlinks not allowed"}
+	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0755); err != nil {
 		return ToolResult{Name: "write_file", Error: "failed to create directory"}
 	}
-	if err := os.WriteFile(resolved, []byte(content), 0644); err != nil {
+	// O_NOFOLLOW closes the TOCTOU window: if the target is swapped for a symlink
+	// between the Lstat above and the open, the open fails rather than following it.
+	f, err := os.OpenFile(resolved, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+	if err != nil {
+		return ToolResult{Name: "write_file", Error: "write failed"}
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte(content)); err != nil {
 		return ToolResult{Name: "write_file", Error: "write failed"}
 	}
 	return ToolResult{Name: "write_file", Content: "wrote " + path}

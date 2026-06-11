@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -35,8 +36,12 @@ func NewHub(apnsClient *apns.Client) *Hub {
 }
 
 func (h *Hub) ListSessions() []SessionRecord {
+	// Snapshot relay-managed sessions under the lock, then release it BEFORE
+	// shelling out to tmux. discoverTmuxSessions runs `su - <user> -c tmux …`,
+	// which can hang (e.g. wg0 contention on this host); holding h.mu across it
+	// would block every CreateSession/DeleteSession (write lock) indefinitely
+	// and wedge all clients, since SessionListJSON is on the hot path.
 	h.mu.RLock()
-	defer h.mu.RUnlock()
 	records := make([]SessionRecord, 0, len(h.sessions))
 	relayNames := make(map[string]bool)
 	for _, s := range h.sessions {
@@ -45,8 +50,9 @@ func (h *Hub) ListSessions() []SessionRecord {
 		records = append(records, rec)
 		relayNames[rec.Name] = true
 	}
+	h.mu.RUnlock()
 
-	// Discover tmux sessions not managed by the relay.
+	// Discover tmux sessions not managed by the relay (no lock held).
 	for _, sys := range discoverTmuxSessions() {
 		if !relayNames[sys.Name] {
 			records = append(records, sys)
@@ -66,17 +72,23 @@ var legacySessionRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]+-\d+$`)
 func discoverTmuxSessions() []SessionRecord {
 	// When running as root (LaunchDaemon), tmux connects to root's server by default.
 	// We need to query the actual user's tmux server instead.
+	// Bound the whole discovery: `su`/`tmux` can hang (wg0 contention, a wedged
+	// tmux server). A timeout means a stuck tmux yields an empty session list
+	// rather than blocking the caller (ListSessions) forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	detectedUser := os.Getenv("CONTINUUM_USER")
 	if detectedUser == "" {
-		if out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output(); err == nil {
+		if out, err := exec.CommandContext(ctx, "stat", "-f", "%Su", "/dev/console").Output(); err == nil {
 			detectedUser = strings.TrimSpace(string(out))
 		}
 	}
 	if detectedUser != "" && detectedUser != "root" {
-		cmd = exec.Command("su", "-", detectedUser, "-c", "tmux list-sessions -F '#{session_name}\t#{session_activity}\t#{session_attached}'")
+		cmd = exec.CommandContext(ctx, "su", "-", detectedUser, "-c", "tmux list-sessions -F '#{session_name}\t#{session_activity}\t#{session_attached}'")
 	} else {
-		cmd = exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}\t#{session_attached}")
+		cmd = exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}\t#{session_attached}")
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -258,4 +270,3 @@ func (h *Hub) SendPush(sessionName, resultSummary string) {
 		}()
 	}
 }
-

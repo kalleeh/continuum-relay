@@ -163,7 +163,7 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 	// Disable with CONTINUUM_NO_USER_SCOPE=1 (e.g. for dev environments where
 	// the user manager isn't running). On macOS the relay is a LaunchDaemon
 	// and PTY children are already isolated via setsid/launchd's own model.
-	cmd := buildPTYCommand(s.command)
+	cmd, userScoped := buildPTYCommand(s.command)
 	env := os.Environ()
 	hasTerm := false
 	for _, e := range env {
@@ -184,6 +184,16 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 	// that survives even if a user spawns another terminal program inside the
 	// session (which would clobber TERM_PROGRAM).
 	env = append(env, "TERM_PROGRAM=Continuum", "CONTINUUM_RELAY=1")
+
+	// Strip the relay's own secrets before handing the environment to the PTY.
+	// The relay inherits CONTINUUM_TOKEN, the Bedrock/Ollama API keys, and the
+	// APNs signing material from its systemd EnvironmentFiles; without this any
+	// session could `env | grep TOKEN` and read the relay's master credential
+	// (which grants peer management and token rotation — a full compromise that
+	// survives rotation since the holder can rotate the token themselves). The
+	// in-session `continuum-relay` CLI does not depend on these being present:
+	// loadToken() falls back to reading /etc/continuum/env (mode 0600).
+	env = stripSecrets(env)
 
 	// Drop privileges to the configured user for PTY sessions.
 	// The relay runs as root or with CAP_NET_ADMIN as a service user (e.g. ubuntu);
@@ -216,8 +226,11 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 				// hides /run/user/<uid> from a default $TMPDIR view, but
 				// XDG_RUNTIME_DIR points to the real path on the host and
 				// systemd resolves it directly. Set it explicitly because
-				// the relay's environment may not have it.
-				if !envHas(env, "XDG_RUNTIME_DIR") {
+				// the relay's environment may not have it. Only do this when the
+				// user-scope wrapper is actually used — on the plain-exec path
+				// (macOS, CONTINUUM_NO_USER_SCOPE, no systemd-run) this dir may
+				// not exist and would mislead XDG-aware tools in the session.
+				if userScoped && !envHas(env, "XDG_RUNTIME_DIR") {
 					env = append(env, fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid))
 				}
 			}
@@ -356,12 +369,22 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 // linger configured), the PTY simply fails to start and the WebSocket gets
 // a 500. Operators can either enable linger (`loginctl enable-linger ubuntu`)
 // or set CONTINUUM_NO_USER_SCOPE=1.
-func buildPTYCommand(command []string) *exec.Cmd {
+// buildPTYCommand returns the command and a bool reporting whether the
+// `systemd-run --user --scope` wrapper was applied. The bool gates the
+// XDG_RUNTIME_DIR injection in handleConn — that variable is only meaningful
+// when the wrapper is used, and setting it on the plain-exec path (macOS,
+// CONTINUUM_NO_USER_SCOPE, or no systemd-run) points XDG-aware tools at a path
+// that may not exist.
+func buildPTYCommand(command []string) (*exec.Cmd, bool) {
 	if runtime.GOOS != "linux" || os.Getenv("CONTINUUM_NO_USER_SCOPE") == "1" {
-		return exec.Command(command[0], command[1:]...)
+		return exec.Command(command[0], command[1:]...), false
 	}
 	if _, err := exec.LookPath("systemd-run"); err != nil {
-		return exec.Command(command[0], command[1:]...)
+		// Falling back to plain exec means PTYs land in the relay's own cgroup
+		// and will NOT survive a relay restart. Warn loudly — this silently
+		// defeats the session-survival design otherwise.
+		slog.Warn("systemd-run not found on PATH; PTY sessions will run in the relay's cgroup and will NOT survive a relay restart")
+		return exec.Command(command[0], command[1:]...), false
 	}
 	args := []string{
 		"--user",
@@ -374,7 +397,38 @@ func buildPTYCommand(command []string) *exec.Cmd {
 		"--",
 	}
 	args = append(args, command...)
-	return exec.Command("systemd-run", args...)
+	return exec.Command("systemd-run", args...), true
+}
+
+// secretEnvPrefixes are the environment-variable name prefixes the relay must
+// not leak into PTY sessions: its own auth token, the Bedrock/Ollama API keys,
+// and the APNs signing credentials. Matched by prefix so both exact names
+// (CONTINUUM_TOKEN) and families (AWS_*, BEDROCK_*, APNS_*) are covered.
+var secretEnvPrefixes = []string{
+	"CONTINUUM_TOKEN=",
+	"OLLAMA_API_KEY=",
+	"BEDROCK_",
+	"AWS_",
+	"APNS_",
+}
+
+// stripSecrets returns env with any entry whose name matches a secret prefix
+// removed. The input slice is not modified.
+func stripSecrets(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		secret := false
+		for _, p := range secretEnvPrefixes {
+			if strings.HasPrefix(e, p) {
+				secret = true
+				break
+			}
+		}
+		if !secret {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // envHas reports whether env contains a "KEY=" entry (any value).
