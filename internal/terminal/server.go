@@ -377,14 +377,19 @@ func buildPTYCommand(command []string) (*exec.Cmd, bool) {
 		slog.Warn("systemd-run not found on PATH; PTY sessions will run in the relay's cgroup and will NOT survive a relay restart")
 		return exec.Command(command[0], command[1:]...), false
 	}
+	// NOTE: do NOT pass exec-context properties (NoNewPrivileges,
+	// AmbientCapabilities, CapabilityBoundingSet) here. A `--scope` unit adopts
+	// an already-forked process and has no exec context, so systemd rejects
+	// these with "Unknown assignment: …" and systemd-run exits non-zero —
+	// killing every PTY at spawn (~6ms). They are service-only properties.
+	// The PTY does not inherit the relay's CAP_NET_ADMIN regardless: ambient
+	// caps are not passed across the systemd-run/dbus spawn, and the relay's
+	// own NoNewPrivileges=true already bounds what the scope can escalate to.
 	args := []string{
 		"--user",
 		"--scope",
 		"--quiet",
 		"--collect", // garbage-collect the transient scope when it exits
-		"--property=AmbientCapabilities=",
-		"--property=CapabilityBoundingSet=",
-		"--property=NoNewPrivileges=yes",
 		"--",
 	}
 	args = append(args, command...)
