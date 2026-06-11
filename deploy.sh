@@ -295,6 +295,8 @@ config['write_files'].extend([
             'ReadOnlyPaths=/etc/continuum\n'
             'AmbientCapabilities=CAP_NET_ADMIN\n'
             'CapabilityBoundingSet=CAP_NET_ADMIN\n'
+            'StandardOutput=append:/var/log/continuum/relay.log\n'
+            'StandardError=append:/var/log/continuum/relay.log\n'
             '\n'
             '[Install]\n'
             'WantedBy=multi-user.target\n'
@@ -311,9 +313,9 @@ config['write_files'].extend([
             '    compress\n'
             '    missingok\n'
             '    notifempty\n'
-            '    postrotate\n'
-            '        systemctl kill -s HUP continuum-relay 2>/dev/null || true\n'
-            '    endscript\n'
+            '    # copytruncate: systemd holds the append: log fd open and will\n'
+            '    # not reopen on HUP, so truncate in place rather than rename.\n'
+            '    copytruncate\n'
             '}\n'
         ),
     },
@@ -1275,33 +1277,40 @@ Or use a VPS with: ./deploy.sh create any"
     # continuum-relay binary
     local relay_bin="continuum-relay-darwin-arm64"
     [[ "$arch" == "x86_64" ]] && relay_bin="continuum-relay-darwin-amd64"
+    # Download to a temp file and verify BEFORE touching the live binary, so a
+    # corrupt/tampered download (or a checksum mismatch) can never overwrite the
+    # running binary — a Restart=always service would otherwise respawn on it.
+    local relay_tmp
+    relay_tmp="$(mktemp)"
     gum spin --title "Downloading continuum-relay ($relay_bin)..." -- \
-      curl -fsSL -o /usr/local/bin/continuum-relay \
+      curl -fsSL -o "$relay_tmp" \
         "https://github.com/kalleeh/continuum-relay/releases/latest/download/${relay_bin}"
     gum spin --title "Verifying checksum..." -- bash -c "
       expected=\$(curl -sfL 'https://github.com/kalleeh/continuum-relay/releases/latest/download/checksums.txt' | grep '${relay_bin}' | awk '{print \$1}')
       if [ -z \"\$expected\" ]; then
         echo 'ERROR: Could not fetch checksums.txt from release — aborting for safety' >&2
-        rm -f /usr/local/bin/continuum-relay 2>/dev/null || true
+        rm -f '$relay_tmp' 2>/dev/null || true
         exit 1
       fi
       actual=\"\"
       if command -v sha256sum &>/dev/null; then
-        actual=\$(sha256sum /usr/local/bin/continuum-relay 2>/dev/null | awk '{print \$1}')
+        actual=\$(sha256sum '$relay_tmp' 2>/dev/null | awk '{print \$1}')
       elif command -v shasum &>/dev/null; then
-        actual=\$(shasum -a 256 /usr/local/bin/continuum-relay 2>/dev/null | awk '{print \$1}')
+        actual=\$(shasum -a 256 '$relay_tmp' 2>/dev/null | awk '{print \$1}')
       fi
       if [ -z \"\$actual\" ]; then
         echo 'ERROR: Failed to compute checksum' >&2
+        rm -f '$relay_tmp' 2>/dev/null || true
         exit 1
       fi
       if [ \"\$expected\" != \"\$actual\" ]; then
         echo 'ERROR: Checksum mismatch — binary may be corrupted or tampered' >&2
-        rm -f /usr/local/bin/continuum-relay
+        rm -f '$relay_tmp' 2>/dev/null || true
         exit 1
       fi
     "
-    chmod +x /usr/local/bin/continuum-relay
+    install -m 0755 "$relay_tmp" /usr/local/bin/continuum-relay
+    rm -f "$relay_tmp"
 
     # WireGuard config
     local wg_dir="${brew_prefix}/etc/wireguard"
@@ -1388,33 +1397,40 @@ PLIST
     # continuum-relay binary
     local relay_arch="amd64"
     [[ "$arch" == "aarch64" || "$arch" == "arm64" ]] && relay_arch="arm64"
+    # Download to a temp file and verify BEFORE installing over the live binary,
+    # so a corrupt/tampered download or checksum mismatch never reaches the path
+    # a Restart=always service would respawn from.
+    local relay_tmp
+    relay_tmp="$(mktemp)"
     gum spin --title "Downloading continuum-relay..." -- \
-      sudo curl -fsSL -o /usr/local/bin/continuum-relay \
+      curl -fsSL -o "$relay_tmp" \
         "https://github.com/kalleeh/continuum-relay/releases/latest/download/continuum-relay-linux-${relay_arch}"
     gum spin --title "Verifying checksum..." -- bash -c "
       expected=\$(curl -sfL 'https://github.com/kalleeh/continuum-relay/releases/latest/download/checksums.txt' | grep 'continuum-relay-linux-${relay_arch}' | awk '{print \$1}')
       if [ -z \"\$expected\" ]; then
         echo 'ERROR: Could not fetch checksums.txt from release — aborting for safety' >&2
-        sudo rm -f /usr/local/bin/continuum-relay 2>/dev/null || true
+        rm -f '$relay_tmp' 2>/dev/null || true
         exit 1
       fi
       actual=\"\"
       if command -v sha256sum &>/dev/null; then
-        actual=\$(sha256sum /usr/local/bin/continuum-relay 2>/dev/null | awk '{print \$1}')
+        actual=\$(sha256sum '$relay_tmp' 2>/dev/null | awk '{print \$1}')
       elif command -v shasum &>/dev/null; then
-        actual=\$(shasum -a 256 /usr/local/bin/continuum-relay 2>/dev/null | awk '{print \$1}')
+        actual=\$(shasum -a 256 '$relay_tmp' 2>/dev/null | awk '{print \$1}')
       fi
       if [ -z \"\$actual\" ]; then
         echo 'ERROR: Failed to compute checksum' >&2
+        rm -f '$relay_tmp' 2>/dev/null || true
         exit 1
       fi
       if [ \"\$expected\" != \"\$actual\" ]; then
         echo 'ERROR: Checksum mismatch — binary may be corrupted or tampered' >&2
-        sudo rm -f /usr/local/bin/continuum-relay
+        rm -f '$relay_tmp' 2>/dev/null || true
         exit 1
       fi
     "
-    sudo chmod +x /usr/local/bin/continuum-relay
+    sudo install -m 0755 "$relay_tmp" /usr/local/bin/continuum-relay
+    rm -f "$relay_tmp"
 
     # WireGuard config
     sudo mkdir -p /etc/wireguard
@@ -1483,12 +1499,18 @@ ReadWritePaths=/var/log/continuum /etc/wireguard
 ReadOnlyPaths=/etc/continuum
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
+StandardOutput=append:/var/log/continuum/relay.log
+StandardError=append:/var/log/continuum/relay.log
 [Install]
 WantedBy=multi-user.target
 SVC
 
       sudo systemctl daemon-reload
       sudo systemctl enable --now continuum-relay
+      # PTY sessions spawn into the user manager's cgroup (systemd-run --user
+      # --scope) to survive relay restarts; that needs linger so the manager
+      # runs without an active login.
+      sudo loginctl enable-linger "${USER}" 2>/dev/null || true
 
       if command -v ufw &>/dev/null; then
         sudo ufw allow from 10.100.0.0/24 to any port 7682 proto tcp comment "Continuum relay"
@@ -1661,10 +1683,14 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/log/continuum
-ReadOnlyPaths=/etc/wireguard /etc/continuum
+# /etc/wireguard must be writable: the relay updates wg0.conf when peers are
+# added/removed via \`continuum-relay peers add|remove\`.
+ReadWritePaths=/var/log/continuum /etc/wireguard
+ReadOnlyPaths=/etc/continuum
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
+StandardOutput=append:/var/log/continuum/relay.log
+StandardError=append:/var/log/continuum/relay.log
 
 [Install]
 WantedBy=multi-user.target
@@ -1699,9 +1725,9 @@ cat > /etc/logrotate.d/continuum << 'LR'
     compress
     missingok
     notifempty
-    postrotate
-        systemctl kill -s HUP continuum-relay 2>/dev/null || true
-    endscript
+    # copytruncate: systemd holds the append: log fd open and won't reopen on
+    # HUP, so truncate in place rather than rename (which orphans the relay's fd).
+    copytruncate
 }
 LR
 

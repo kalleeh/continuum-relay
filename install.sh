@@ -109,7 +109,10 @@ enable_linger() {
   if ! command -v loginctl >/dev/null 2>&1; then
     return
   fi
-  user="${SUDO_USER:-${CONTINUUM_USER:-ubuntu}}"
+  # Linger must target the user the relay unit runs as (the one whose user
+  # manager will own the PTY scopes), not whoever invoked sudo. RELAY_USER is
+  # resolved by detect_relay_user; fall back only if it isn't set yet.
+  user="${RELAY_USER:-${CONTINUUM_USER:-${SUDO_USER:-ubuntu}}}"
   if ! id "$user" >/dev/null 2>&1; then
     return
   fi
@@ -338,6 +341,8 @@ ReadWritePaths=$LOG_DIR /etc/wireguard
 ReadOnlyPaths=/etc/continuum
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
+StandardOutput=append:$LOG_DIR/relay.log
+StandardError=append:$LOG_DIR/relay.log
 
 [Install]
 WantedBy=multi-user.target
@@ -350,9 +355,11 @@ EOF
     compress
     missingok
     notifempty
-    postrotate
-        systemctl kill -s HUP continuum-relay 2>/dev/null || true
-    endscript
+    # copytruncate: the relay logs via systemd StandardOutput=append:, which
+    # holds the file open; a HUP won't make systemd reopen it, so a rename-based
+    # rotation would leave the relay writing to a deleted inode. Truncating in
+    # place keeps the existing fd valid.
+    copytruncate
 }
 EOF
     systemctl daemon-reload
@@ -477,6 +484,10 @@ download_binary
 if [ "$OS" = "linux" ]; then
   install_linux_service
   configure_linux_firewall
+  # Fresh installs must enable linger too — the upgrade path does this via
+  # restart_service, but a first-time `curl install.sh | sudo sh` would
+  # otherwise leave PTY sessions dying on every relay restart after logout.
+  enable_linger
 else
   install_macos_service
 fi
