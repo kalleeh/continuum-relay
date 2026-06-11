@@ -43,7 +43,13 @@ func SyncProject(slug, token string) error {
 	}
 	parts := strings.SplitN(slug, "/", 2)
 	repoName := parts[1]
-	dest := filepath.Join(ProjectsDir(), repoName)
+	// Validate through the same guard as RemoveProject: slugRe's character class
+	// permits "." and "..", and a repoName of "." would resolve dest to the
+	// projects dir itself (a failed clone then os.RemoveAll's the whole tree).
+	dest, err := projectPath(repoName)
+	if err != nil {
+		return fmt.Errorf("invalid repo name: %w", err)
+	}
 	authedURL := fmt.Sprintf("https://%s@github.com/%s.git", token, slug)
 	cleanURL := fmt.Sprintf("https://github.com/%s.git", slug)
 

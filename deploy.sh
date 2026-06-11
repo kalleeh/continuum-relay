@@ -1505,6 +1505,21 @@ StandardError=append:/var/log/continuum/relay.log
 WantedBy=multi-user.target
 SVC
 
+      # copytruncate: the relay logs via systemd StandardOutput=append:, which
+      # holds the file open; a HUP won't make systemd reopen it, so a rename-based
+      # rotation would leave the relay writing to a deleted inode. Truncating in
+      # place keeps the existing fd valid.
+      sudo tee /etc/logrotate.d/continuum > /dev/null << 'LOGROTATE'
+/var/log/continuum/*.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE
+
       sudo systemctl daemon-reload
       sudo systemctl enable --now continuum-relay
       # PTY sessions spawn into the user manager's cgroup (systemd-run --user

@@ -131,7 +131,10 @@ func parseAhead(track string) int {
 
 func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
+	// Use the same minimal env as SyncProject: dir is a user-cloned repo, and
+	// git can run repo-controlled code (hooks, credential helpers) that would
+	// otherwise inherit the relay's secrets via os.Environ().
+	cmd.Env = gitEnv()
 	out, err := cmd.Output()
 	return string(out), err
 }

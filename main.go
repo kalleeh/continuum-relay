@@ -209,6 +209,9 @@ func main() {
 	publicIP := os.Getenv("CONTINUUM_PUBLIC_IP")
 	if publicIP == "" {
 		publicIP = discoverPublicIP()
+		if publicIP == "0.0.0.0" {
+			slog.Warn("public IP discovery failed; QR payloads will contain placeholder 0.0.0.0 and peers won't connect — set CONTINUUM_PUBLIC_IP")
+		}
 	}
 	if os.Getenv("CONTINUUM_WG_DISABLED") != "1" {
 		// Wire the live wg device so peer add/remove takes immediate effect

@@ -67,6 +67,24 @@ func TestRemoveProject_ForceDeletesChild(t *testing.T) {
 	}
 }
 
+// TestSyncProject_RejectsDangerousRepoName guards the sibling gap to the
+// RemoveProject(".") bug: slugRe permits "." / ".." in the repo half, so a slug
+// like "owner/.." once resolved the clone destination outside (or onto) the
+// projects dir via a raw filepath.Join. SyncProject must reject it before any
+// git/filesystem work — verified by the error arriving without a git binary
+// having to run (these names fail validation, not the clone).
+func TestSyncProject_RejectsDangerousRepoName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	for _, slug := range []string{"owner/.", "owner/..", "owner/../../etc"} {
+		err := SyncProject(slug, "tok")
+		if err == nil {
+			t.Errorf("SyncProject(%q) = nil error, want rejection", slug)
+		}
+	}
+}
+
 // TestRemoveProject_UnsavedWorkNeedsForce locks in the contract the iOS client
 // relies on: a dirty repo (untracked file) is refused with ErrUnsavedWork when
 // force is false, and deleted when force is true. The relay maps ErrUnsavedWork
