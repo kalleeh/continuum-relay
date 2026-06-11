@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/continuum-app/continuum-relay/internal/apns"
+	"github.com/continuum-app/continuum-relay/internal/auth"
 	"github.com/continuum-app/continuum-relay/internal/logging"
 	"github.com/continuum-app/continuum-relay/internal/peers"
 	"github.com/continuum-app/continuum-relay/internal/relay"
@@ -108,6 +109,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One authenticator shared by the relay API and the terminal endpoint, so a
+	// rotate_token updates both at once and they share a single per-IP lockout.
+	authenticator := auth.New(token)
+
 	addr := os.Getenv("CONTINUUM_RELAY_ADDR")
 	if addr == "" {
 		addr = "10.100.0.1:7682"
@@ -178,7 +183,7 @@ func main() {
 		}
 		termAddr = net.JoinHostPort(host, "7681")
 	}
-	termServer := terminal.New(termAddr, token, termCmd)
+	termServer := terminal.New(termAddr, authenticator, termCmd)
 	// Run PTY sessions as the detected user (not root).
 	// Override with CONTINUUM_USER env var if needed.
 	termUser := os.Getenv("CONTINUUM_USER")
@@ -234,7 +239,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	server := relay.NewServer(addr, token, apnsClient, peersMgr, relayListener)
+	server := relay.NewServer(addr, authenticator, apnsClient, peersMgr, relayListener)
 	go func() {
 		if err := server.Run(ctx); err != nil {
 			slog.Error("relay server exited", "err", err)

@@ -13,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/continuum-app/continuum-relay/internal/auth"
 	"github.com/continuum-app/continuum-relay/internal/tools"
 )
 
@@ -142,8 +143,9 @@ func (s *Server) handleChatProxy(w http.ResponseWriter, r *http.Request) {
 			if tools.SafeTools[name] {
 				result = tools.Execute(call)
 			} else {
-				// Send permission request inline to iOS client
-				allowed := s.requestInlinePermission(ctx, w, flusher, name, tc.Function.Arguments)
+				// Send permission request inline to iOS client. Bind it to this
+				// client's IP so only the originating device can approve it.
+				allowed := s.requestInlinePermission(ctx, w, flusher, auth.ClientIP(r), name, tc.Function.Arguments)
 				if allowed {
 					slog.Info("tool permission granted", "name", name)
 					result = tools.ExecuteUnsafe(call)
@@ -199,10 +201,10 @@ func (s *Server) handleChatProxy(w http.ResponseWriter, r *http.Request) {
 
 // requestInlinePermission sends a permission request as an NDJSON line in the
 // HTTP streaming response, then waits for the response via /api/permission.
-func (s *Server) requestInlinePermission(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, toolName string, args json.RawMessage) bool {
+func (s *Server) requestInlinePermission(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, ownerIP, toolName string, args json.RawMessage) bool {
 	id := randomPermID()
 
-	ch := s.broker.RegisterPending(id)
+	ch := s.broker.RegisterPending(id, ownerIP)
 	defer s.broker.RemovePending(id)
 
 	line, _ := json.Marshal(map[string]any{

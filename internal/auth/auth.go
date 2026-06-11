@@ -2,7 +2,9 @@ package auth
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,8 +28,21 @@ func New(token string) *Authenticator {
 // ValidateRequest checks the Authorization: Bearer <token> header.
 // Returns false if token is wrong OR if the IP is rate-limited.
 func (a *Authenticator) ValidateRequest(r *http.Request) bool {
-	ip := clientIP(r)
+	return a.validate(clientIP(r), extractBearer(r.Header.Get("Authorization")))
+}
 
+// ValidateBasic checks an Authorization: Basic <base64(username:token)> header,
+// where username must equal the given value. It shares the same per-IP lockout
+// as ValidateRequest, so the terminal WebSocket endpoint (which uses Basic auth)
+// gets the same brute-force protection as the Bearer-authenticated relay API.
+func (a *Authenticator) ValidateBasic(r *http.Request, username string) bool {
+	return a.validate(clientIP(r), extractBasic(r.Header.Get("Authorization"), username))
+}
+
+// validate runs the shared rate-limit + constant-time token comparison. provided
+// is the bare token already extracted from whichever auth scheme the caller used
+// (empty string if the header was missing/malformed — treated as a failure).
+func (a *Authenticator) validate(ip, provided string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -37,7 +52,6 @@ func (a *Authenticator) ValidateRequest(r *http.Request) bool {
 	}
 
 	// Check token
-	provided := extractBearer(r.Header.Get("Authorization"))
 	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(a.token)) != 1 {
 		a.recordFailure(ip)
 		return false
@@ -83,6 +97,32 @@ func extractBearer(header string) string {
 		return header[len(prefix):]
 	}
 	return ""
+}
+
+// extractBasic decodes an Authorization: Basic header and returns the password
+// half iff the username half exactly matches want. Returns "" on any mismatch or
+// malformed input, which validate() then treats as an auth failure.
+func extractBasic(header, want string) string {
+	const prefix = "Basic "
+	if len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(header[len(prefix):])
+	if err != nil {
+		return ""
+	}
+	user, pass, ok := strings.Cut(string(decoded), ":")
+	if !ok || user != want {
+		return ""
+	}
+	return pass
+}
+
+// ClientIP returns the source IP of the request (no port). Exported so callers
+// outside this package can key state on the same identity the rate limiter uses
+// — e.g. binding a permission request to the client that originated it.
+func ClientIP(r *http.Request) string {
+	return clientIP(r)
 }
 
 func clientIP(r *http.Request) string {

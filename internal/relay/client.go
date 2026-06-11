@@ -39,14 +39,9 @@ type ClientMessage struct {
 	Force       bool   `json:"force,omitempty"`        // remove_project: delete even with unsaved work
 }
 
-func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, broker *PermissionBroker, clientID string) {
+func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
 	slog.Info("client connected", "id", clientID)
 	defer slog.Info("client disconnected", "id", clientID)
-
-	broker.RegisterClient(clientID, func(msg []byte) {
-		conn.Write(ctx, websocket.MessageText, msg)
-	})
-	defer broker.UnregisterClient(clientID)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -274,10 +269,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				"unpushed":    st.Unpushed,
 			})
 
-		case "tool_permission_response":
-			if msg.ID != "" {
-				broker.Respond(msg.ID, msg.Allow)
-			}
+		// Note: tool-permission responses come back over HTTP POST /api/permission
+		// (handlePermissionResponse), not this WebSocket, so they can be bound to
+		// the originating client's IP. There is intentionally no permission case here.
 		}
 	}
 	<-outDone

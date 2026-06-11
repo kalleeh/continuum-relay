@@ -7,8 +7,6 @@ package terminal
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/continuum-app/continuum-relay/internal/auth"
 	"github.com/creack/pty"
 	"nhooyr.io/websocket"
 )
@@ -30,21 +29,25 @@ import (
 // Server is an HTTP+WebSocket terminal server compatible with the ttyd/xterm.js protocol.
 // Each WebSocket connection gets its own PTY running the configured command.
 type Server struct {
-	addr     string       // e.g. "10.100.0.1:7681"
-	token    string       // auth token (compared against Basic auth credential, username is "continuum")
-	command  []string     // command to run in PTY, e.g. ["tmux", "new-session", "-A", "-s", "main"]
-	Listener net.Listener // if set, used instead of net.Listen(addr)
-	User     string       // if set, PTY processes run as this user (requires root)
+	addr     string              // e.g. "10.100.0.1:7681"
+	auth     *auth.Authenticator // shared with the relay API: Basic-auth check + per-IP lockout, and sees token rotations
+	command  []string            // command to run in PTY, e.g. ["tmux", "new-session", "-A", "-s", "main"]
+	Listener net.Listener        // if set, used instead of net.Listen(addr)
+	User     string              // if set, PTY processes run as this user (requires root)
 }
 
 // New creates a terminal server.
 // addr: listen address, e.g. "10.100.0.1:7681"
-// token: auth token for Basic auth (username is always "continuum")
+// authenticator: shared with the relay API so the terminal validates against the
+//
+//	live token (rotations via rotate_token take effect immediately) and shares
+//	the same per-IP brute-force lockout. The Basic-auth username is "continuum".
+//
 // command: program to run in each PTY session
-func New(addr, token string, command []string) *Server {
+func New(addr string, authenticator *auth.Authenticator, command []string) *Server {
 	return &Server{
 		addr:    addr,
-		token:   token,
+		auth:    authenticator,
 		command: command,
 	}
 }
@@ -87,8 +90,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate Basic auth before upgrading to WebSocket.
-	if !s.checkAuth(r) {
+	// Validate Basic auth before upgrading to WebSocket. Shared authenticator
+	// enforces the same per-IP lockout as the relay API and reflects token
+	// rotations immediately.
+	if !s.auth.ValidateBasic(r, "continuum") {
+		slog.Warn("terminal auth failed", "ip", r.RemoteAddr)
 		w.Header().Set("WWW-Authenticate", `Basic realm="continuum"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -106,21 +112,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("terminal client connected", "ip", r.RemoteAddr)
 	s.handleConn(r.Context(), conn, r.RemoteAddr)
-}
-
-// checkAuth validates the Authorization: Basic header.
-// Expected credential: "continuum:<token>".
-func (s *Server) checkAuth(r *http.Request) bool {
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Basic ") {
-		return false
-	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
-	if err != nil {
-		return false
-	}
-	expected := "continuum:" + s.token
-	return subtle.ConstantTimeCompare([]byte(decoded), []byte(expected)) == 1
 }
 
 // handleConn spawns a PTY process and bridges it to the WebSocket connection.

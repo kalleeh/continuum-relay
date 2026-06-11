@@ -36,10 +36,15 @@ type Server struct {
 	serverInfo sysinfo.Info
 }
 
-func NewServer(addr, token string, apnsClient *apns.Client, peersMgr *peers.Manager, listener net.Listener) *Server {
+// NewServer builds the relay HTTP/WebSocket server. The authenticator is passed
+// in (rather than constructed here) so the terminal server can share the same
+// instance — that gives the PTY endpoint the same per-IP lockout and, crucially,
+// makes rotate_token (which calls authenticator.UpdateToken) take effect on the
+// terminal endpoint too, instead of leaving the old token valid there until restart.
+func NewServer(addr string, authenticator *auth.Authenticator, apnsClient *apns.Client, peersMgr *peers.Manager, listener net.Listener) *Server {
 	return &Server{
 		hub:        NewHub(apnsClient),
-		auth:       auth.New(token),
+		auth:       authenticator,
 		broker:     NewPermissionBroker(),
 		peers:      peersMgr,
 		addr:       addr,
@@ -109,7 +114,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clientID := newClientID()
 	slog.Info("client authenticated", "id", clientID, "ip", r.RemoteAddr)
 
-	HandleClient(r.Context(), conn, s.hub, s.auth, s.broker, clientID)
+	HandleClient(r.Context(), conn, s.hub, s.auth, clientID)
 
 	conn.Close(websocket.StatusNormalClosure, "")
 }
@@ -134,7 +139,13 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.broker.Respond(req.ID, req.Allow)
+	// Bind to the originating client: Respond is a no-op unless this IP is the
+	// one that registered the request, so another device sharing the token
+	// can't approve a prompt for this client's session. Always return 200 so a
+	// rejected attempt can't probe which IDs exist.
+	if !s.broker.Respond(req.ID, auth.ClientIP(r), req.Allow) {
+		slog.Warn("permission response rejected (unknown id or wrong client)", "ip", r.RemoteAddr)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
