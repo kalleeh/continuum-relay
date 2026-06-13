@@ -42,21 +42,49 @@ func (h *Hub) ListSessions() []SessionRecord {
 	// would block every CreateSession/DeleteSession (write lock) indefinitely
 	// and wedge all clients, since SessionListJSON is on the hot path.
 	h.mu.RLock()
-	records := make([]SessionRecord, 0, len(h.sessions))
-	relayNames := make(map[string]bool)
+	relayRecords := make([]SessionRecord, 0, len(h.sessions))
 	for _, s := range h.sessions {
 		rec := s.GetRecord()
 		rec.Source = "relay"
-		records = append(records, rec)
-		relayNames[rec.Name] = true
+		relayRecords = append(relayRecords, rec)
 	}
 	h.mu.RUnlock()
 
 	// Discover tmux sessions not managed by the relay (no lock held).
-	for _, sys := range discoverTmuxSessions() {
-		if !relayNames[sys.Name] {
-			records = append(records, sys)
+	return mergeDiscovered(relayRecords, discoverTmuxSessions())
+}
+
+// mergeDiscovered appends discovered ("system") tmux sessions to the relay's
+// own records, dropping any discovered session that's already represented by a
+// live relay record. A discovered session is a duplicate when either:
+//
+//   - its name matches a relay record's logical name (same session, e.g. after a
+//     relay restart where h.sessions was rebuilt), or
+//   - its name matches a relay record's project. A project-backed agent session
+//     is hosted in a tmux session named cx-<project> with the agent in a *window*;
+//     `tmux list-sessions` sees cx-<project> and strips it to <project>, which
+//     never matches the relay record's logical window name. Without the project
+//     check that container slips through as a phantom type=terminal/source=system
+//     duplicate alongside the real agent session.
+//
+// Kept pure (no tmux shellout, no lock) so the dedup logic is unit-testable.
+func mergeDiscovered(relayRecords, discovered []SessionRecord) []SessionRecord {
+	relayNames := make(map[string]bool, len(relayRecords))
+	relayProjects := make(map[string]bool, len(relayRecords))
+	for _, rec := range relayRecords {
+		relayNames[rec.Name] = true
+		if rec.Project != "" {
+			relayProjects[rec.Project] = true
 		}
+	}
+
+	records := make([]SessionRecord, 0, len(relayRecords)+len(discovered))
+	records = append(records, relayRecords...)
+	for _, sys := range discovered {
+		if relayNames[sys.Name] || relayProjects[sys.Name] {
+			continue
+		}
+		records = append(records, sys)
 	}
 	return records
 }
