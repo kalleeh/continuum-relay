@@ -493,6 +493,22 @@ RUNCMD
   # Cloud-init completion marker (#8)
   echo "  - touch /var/lib/cloud/.cloud-init-complete" >> "$tmp_ci"
 
+  # Scrub secrets from the cached user-data. EC2/DO/Hetzner deliver this YAML
+  # as #cloud-config user-data, which the instance metadata service keeps
+  # readable indefinitely — CONTINUUM_TOKEN, the WireGuard server private key,
+  # and the Bedrock/Ollama keys are all baked into it here. The relay reads its
+  # token from /etc/continuum/env (mode 0600), not from this cache, so deleting
+  # it and blocking IMDS access to user-data is safe and runs last. (Lightsail
+  # does the same scrub inside its wrapper below, so skip it here for that path.)
+  if [[ "$provider" != "lightsail" ]]; then
+    cat >> "$tmp_ci" <<'SCRUB'
+  - rm -f /var/lib/cloud/instance/scripts/part-001
+  - rm -f /var/lib/cloud/instance/user-data.txt
+  - rm -f /var/lib/cloud/instances/*/user-data.txt 2>/dev/null || true
+  - iptables -A OUTPUT -d 169.254.169.254 -p tcp --dport 80 -m string --string "user-data" --algo bm -j DROP 2>/dev/null || true
+SCRUB
+  fi
+
   # Lightsail doesn't support #cloud-config YAML natively.
   # Its --user-data only accepts shell scripts. We wrap the complete
   # cloud-init YAML (already built above with all injections) in a
