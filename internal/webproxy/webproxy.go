@@ -27,14 +27,38 @@ import (
 
 const prefix = "/proxy/"
 
-// blockedPorts are never proxiable: the relay's own API + terminal, Ollama, and
-// WireGuard. Proxying these would let an authenticated browser request reach the
-// relay's auth surface or the model backend through a different door.
+// blockedPorts are never proxiable. The proxy dials 127.0.0.1:{port}, so beyond
+// the relay's own surfaces it must NOT become a pivot to local infrastructure
+// services that trust loopback connections without auth (Docker daemon, Redis,
+// databases, etc.) — reaching those through the bearer-authed tunnel would be an
+// SSRF/privilege pivot. The intended target is a dev/preview HTTP server an
+// agent starts, not infra. We keep the broad ephemeral range open (dev servers
+// pick varied ports) but deny the well-known sensitive ones explicitly.
 var blockedPorts = map[int]bool{
+	// Continuum's own surfaces.
 	7681:  true, // terminal websocket
 	7682:  true, // relay API (this server)
 	11434: true, // Ollama
 	51820: true, // WireGuard
+	// Loopback-trusting infrastructure — a proxy pivot here is RCE/data theft.
+	2375:  true, // Docker daemon (HTTP) — root RCE
+	2376:  true, // Docker daemon (TLS)
+	2379:  true, // etcd
+	2380:  true, // etcd peer
+	3306:  true, // MySQL/MariaDB
+	5432:  true, // PostgreSQL
+	5984:  true, // CouchDB
+	6379:  true, // Redis
+	8125:  true, // statsd
+	9000:  true, // common admin/minio
+	9090:  true, // Prometheus
+	9200:  true, // Elasticsearch
+	9300:  true, // Elasticsearch transport
+	11211: true, // memcached
+	15672: true, // RabbitMQ management
+	27017: true, // MongoDB
+	5900:  true, // VNC
+	5901:  true, // VNC
 }
 
 // Handler returns an http.HandlerFunc that proxies /proxy/{port}/{path...} to
@@ -62,8 +86,12 @@ func Handler() http.HandlerFunc {
 				// RawQuery is preserved as-is by ReverseProxy.
 				req.URL.Path = "/" + rest
 				// Strip our bearer credential before it leaves to the local server —
-				// the dev server has no business seeing the relay token.
+				// the dev server has no business seeing the relay token. Also drop
+				// the browser's cxproxy-scoped Cookie/Origin so a loopback-trusting
+				// dev panel doesn't receive app-internal credentials/origins.
 				req.Header.Del("Authorization")
+				req.Header.Del("Cookie")
+				req.Header.Del("Origin")
 				// We are the origin from localhost's point of view.
 				req.Header.Set("X-Forwarded-Host", req.Header.Get("Host"))
 			},

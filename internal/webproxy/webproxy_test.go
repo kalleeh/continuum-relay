@@ -35,7 +35,8 @@ func TestParseTarget(t *testing.T) {
 
 func TestHandler_BlocksDisallowedPorts(t *testing.T) {
 	h := Handler()
-	for _, p := range []int{22, 80, 1023, 7681, 7682, 11434, 51820, 70000} {
+	for _, p := range []int{22, 80, 1023, 7681, 7682, 11434, 51820, 70000,
+		2375, 2376, 3306, 5432, 6379, 9200, 27017, 5900} {
 		req := httptest.NewRequest(http.MethodGet, "/proxy/"+strconv.Itoa(p)+"/", nil)
 		rec := httptest.NewRecorder()
 		h(rec, req)
