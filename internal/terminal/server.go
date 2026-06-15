@@ -32,8 +32,9 @@ type Server struct {
 	addr     string              // e.g. "10.100.0.1:7681"
 	auth     *auth.Authenticator // shared with the relay API: Basic-auth check + per-IP lockout, and sees token rotations
 	command  []string            // command to run in PTY, e.g. ["tmux", "new-session", "-A", "-s", "main"]
-	Listener net.Listener        // if set, used instead of net.Listen(addr)
-	User     string              // if set, PTY processes run as this user (requires root)
+	Listener  net.Listener       // if set, used instead of net.Listen(addr)
+	User      string             // if set, PTY processes run as this user (requires root)
+	SharedDir string             // if set, exported to the PTY as CONTINUUM_SHARED_DIR
 }
 
 // New creates a terminal server.
@@ -175,6 +176,14 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 	// that survives even if a user spawns another terminal program inside the
 	// session (which would clobber TERM_PROGRAM).
 	env = append(env, "TERM_PROGRAM=Continuum", "CONTINUUM_RELAY=1")
+
+	// Tell the session where the file-transfer shared directory is, so agents
+	// (and the user) can read/write files uploaded from the iOS client. Not a
+	// secret, so stripSecrets leaves it; it's a sibling of the projects tree
+	// (never inside a repo) — see sysinfo.detectSharedDir.
+	if s.SharedDir != "" {
+		env = append(env, "CONTINUUM_SHARED_DIR="+s.SharedDir)
+	}
 
 	// Strip the relay's own secrets before handing the environment to the PTY.
 	// The relay inherits CONTINUUM_TOKEN, the Bedrock/Ollama API keys, and the

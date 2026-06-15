@@ -21,6 +21,7 @@ type Info struct {
 	TmuxPath         string   `json:"tmuxPath"`         // absolute path to tmux
 	DefaultWorkDir   string   `json:"defaultWorkDir"`   // recommended working directory
 	ProjectsDir      string   `json:"projectsDir"`      // recommended projects root
+	SharedDir        string   `json:"sharedDir"`        // file-transfer shared dir (sibling of projects, never inside a repo)
 }
 
 // Detect probes the current system and returns an Info struct.
@@ -38,8 +39,20 @@ func Detect() Info {
 	info.TmuxPath = detectTmux()
 	info.DefaultWorkDir = detectWorkDir(info.Home)
 	info.ProjectsDir = detectProjectsDir(info.Home)
+	info.SharedDir = detectSharedDir(info.Home)
 
 	return info
+}
+
+// detectSharedDir returns the file-transfer shared directory and ensures it
+// exists. It lives at $HOME/continuum-shared — deliberately a sibling of the
+// projects tree, never inside a git working copy, so uploaded files can't
+// pollute a repository's status or get accidentally committed. Mode 0700:
+// single-user box, no reason for it to be group/other-readable.
+func detectSharedDir(home string) string {
+	dir := filepath.Join(home, "continuum-shared")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
 }
 
 func detectUser() string {

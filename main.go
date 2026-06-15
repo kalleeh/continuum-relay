@@ -191,6 +191,8 @@ func main() {
 		termUser = sysinfo.Detect().User
 	}
 	termServer.User = termUser
+	// Export the shared file-transfer dir to every PTY (CONTINUUM_SHARED_DIR).
+	termServer.SharedDir = sysinfo.Detect().SharedDir
 	if wgNet != nil {
 		ln, err := wgNet.listenTCP(termAddr)
 		if err != nil {

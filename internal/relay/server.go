@@ -16,8 +16,10 @@ import (
 
 	"github.com/continuum-app/continuum-relay/internal/apns"
 	"github.com/continuum-app/continuum-relay/internal/auth"
+	"github.com/continuum-app/continuum-relay/internal/files"
 	"github.com/continuum-app/continuum-relay/internal/peers"
 	"github.com/continuum-app/continuum-relay/internal/sysinfo"
+	"github.com/continuum-app/continuum-relay/internal/webproxy"
 )
 
 func newClientID() string {
@@ -34,6 +36,7 @@ type Server struct {
 	addr       string
 	listener   net.Listener
 	serverInfo sysinfo.Info
+	files      *files.Server
 }
 
 // NewServer builds the relay HTTP/WebSocket server. The authenticator is passed
@@ -42,6 +45,7 @@ type Server struct {
 // makes rotate_token (which calls authenticator.UpdateToken) take effect on the
 // terminal endpoint too, instead of leaving the old token valid there until restart.
 func NewServer(addr string, authenticator *auth.Authenticator, apnsClient *apns.Client, peersMgr *peers.Manager, listener net.Listener) *Server {
+	info := sysinfo.Detect()
 	return &Server{
 		hub:        NewHub(apnsClient),
 		auth:       authenticator,
@@ -49,7 +53,8 @@ func NewServer(addr string, authenticator *auth.Authenticator, apnsClient *apns.
 		peers:      peersMgr,
 		addr:       addr,
 		listener:   listener,
-		serverInfo: sysinfo.Detect(),
+		serverInfo: info,
+		files:      files.New(info.SharedDir),
 	}
 }
 
@@ -61,6 +66,16 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/peers", s.handlePeers)
 	mux.HandleFunc("/api/info", s.handleInfo)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
+	// File transfer over the shared directory. Each handler is bearer-authed via
+	// authed(); GET /api/files lists, the download/upload subpaths stream, DELETE
+	// /api/files removes. The exact-match mux routes the subpaths separately from
+	// the bare /api/files list/delete.
+	mux.HandleFunc("/api/files", s.authed(s.handleFiles))
+	mux.HandleFunc("/api/files/download", s.authed(s.files.HandleDownload))
+	mux.HandleFunc("/api/files/upload", s.authed(s.files.HandleUpload))
+	// Authenticated reverse proxy to local dev servers (the in-app browser).
+	// /proxy/{port}/{path} → http://127.0.0.1:{port}/{path}, bearer-authed.
+	mux.HandleFunc("/proxy/", s.authed(webproxy.Handler()))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -176,6 +191,32 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.serverInfo)
+}
+
+// authed wraps a handler with the shared bearer-token check + per-IP lockout,
+// returning 401 on failure. Used for the file-transfer routes so each one
+// doesn't repeat the guard.
+func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.auth.ValidateRequest(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// handleFiles routes the bare /api/files path: GET lists the shared dir, DELETE
+// removes a named file. The download/upload subpaths are registered separately.
+func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.files.HandleList(w, r)
+	case http.MethodDelete:
+		s.files.HandleDelete(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
