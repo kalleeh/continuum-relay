@@ -27,8 +27,11 @@ submodule at `server/continuum-relay/`.
   query the *already-running* relay over HTTP (`/health`, `/api/sessions`).
   They never start a second server, so they are safe to run alongside the
   systemd service.
-- **APNs push** — optional push notifications when a Claude Code session
-  finishes its turn.
+- **Status detector** — polls tmux session activity and emits `session_status`
+  (working/idle) over the WebSocket, also driving Live Activity updates.
+- **APNs push** (optional, needs `APNS_*` configured) — Live Activity
+  background updates, and an alert when an Ollama tool-permission prompt is
+  waiting for approval. No-ops when APNs is unconfigured.
 
 ## Requirements
 
