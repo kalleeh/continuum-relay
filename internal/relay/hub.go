@@ -128,37 +128,38 @@ var legacySessionRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]+-\d+$`)
 // tmuxDiscoveryCommand builds the `tmux list-sessions` invocation used for
 // discovery. Crucially it must reach the *user's* tmux server.
 //
-// The relay's systemd unit sets PrivateTmp=true, which gives the relay process
-// an isolated /tmp — so a bare `tmux` (whose default socket is /tmp/tmux-<uid>/
-// default) sees an empty namespace and finds nothing, even though the user's
-// sessions exist on the host /tmp. The PTY spawn already solves this by running
-// under `systemd-run --user --scope` (the user-manager context, real /tmp), so
-// we mirror that here. XDG_RUNTIME_DIR is set so systemd-run can reach the user
-// bus, matching terminal/server.go's handleConn.
+// The relay's systemd unit sets PrivateTmp=true, giving the relay an isolated
+// /tmp — so a bare `tmux` (default socket /tmp/tmux-<uid>/default) sees an
+// empty namespace and finds nothing. PrivateTmp only remaps /tmp and /var/tmp,
+// NOT /run/user/<uid>, which stays visible across the namespace. So we point
+// tmux at a socket dir under /run/user/<uid> via TMUX_TMPDIR — verified
+// reachable from the relay's namespace. The PTY spawn (terminal/server.go) sets
+// the SAME TMUX_TMPDIR so the app's sessions land on this discoverable socket.
 //
-// Falls back to a bare `tmux` on macOS, when CONTINUUM_NO_USER_SCOPE=1, or when
-// systemd-run isn't on PATH (dev environments where PrivateTmp isn't in play).
+// Falls back to a bare `tmux` (no override) on macOS or when there's no
+// per-user runtime dir, where PrivateTmp isn't in play.
 func tmuxDiscoveryCommand(ctx context.Context, format string) *exec.Cmd {
-	listArgs := []string{"list-sessions", "-F", format}
-
-	if runtime.GOOS != "linux" || os.Getenv("CONTINUUM_NO_USER_SCOPE") == "1" {
-		return exec.CommandContext(ctx, "tmux", listArgs...)
-	}
-	if _, err := exec.LookPath("systemd-run"); err != nil {
-		return exec.CommandContext(ctx, "tmux", listArgs...)
-	}
-
-	args := append([]string{"--user", "--scope", "--quiet", "--collect", "--pipe", "--", "tmux"}, listArgs...)
-	cmd := exec.CommandContext(ctx, "systemd-run", args...)
-	// systemd-run --user needs the user bus; the relay's env may lack
-	// XDG_RUNTIME_DIR (PrivateTmp hides /run/user from $TMPDIR views). Point it
-	// at the real per-user runtime dir, same as the PTY-spawn path.
-	if os.Getenv("XDG_RUNTIME_DIR") == "" {
-		if uid := os.Getuid(); uid > 0 {
-			cmd.Env = append(os.Environ(), fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid))
-		}
+	cmd := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", format)
+	if dir := tmuxSocketDir(); dir != "" {
+		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+dir)
 	}
 	return cmd
+}
+
+// tmuxSocketDir returns the TMUX_TMPDIR the relay and its PTY spawns should use
+// so tmux sockets live somewhere visible despite PrivateTmp. Empty string means
+// "use tmux's default" (macOS / no per-user runtime dir).
+func tmuxSocketDir() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	if uid := os.Getuid(); uid > 0 {
+		dir := fmt.Sprintf("/run/user/%d", uid)
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return dir
+		}
+	}
+	return ""
 }
 
 // discoverTmuxSessions runs `tmux list-sessions` and returns records for

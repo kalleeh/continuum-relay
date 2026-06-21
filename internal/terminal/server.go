@@ -29,12 +29,12 @@ import (
 // Server is an HTTP+WebSocket terminal server compatible with the ttyd/xterm.js protocol.
 // Each WebSocket connection gets its own PTY running the configured command.
 type Server struct {
-	addr     string              // e.g. "10.100.0.1:7681"
-	auth     *auth.Authenticator // shared with the relay API: Basic-auth check + per-IP lockout, and sees token rotations
-	command  []string            // command to run in PTY, e.g. ["tmux", "new-session", "-A", "-s", "main"]
-	Listener  net.Listener       // if set, used instead of net.Listen(addr)
-	User      string             // if set, PTY processes run as this user (requires root)
-	SharedDir string             // if set, exported to the PTY as CONTINUUM_SHARED_DIR
+	addr      string              // e.g. "10.100.0.1:7681"
+	auth      *auth.Authenticator // shared with the relay API: Basic-auth check + per-IP lockout, and sees token rotations
+	command   []string            // command to run in PTY, e.g. ["tmux", "new-session", "-A", "-s", "main"]
+	Listener  net.Listener        // if set, used instead of net.Listen(addr)
+	User      string              // if set, PTY processes run as this user (requires root)
+	SharedDir string              // if set, exported to the PTY as CONTINUUM_SHARED_DIR
 }
 
 // New creates a terminal server.
@@ -232,6 +232,19 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 				// not exist and would mislead XDG-aware tools in the session.
 				if userScoped && !envHas(env, "XDG_RUNTIME_DIR") {
 					env = append(env, fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid))
+				}
+				// Put the tmux socket under /run/user/<uid> rather than the
+				// default /tmp/tmux-<uid>. PrivateTmp=true in the relay unit
+				// isolates /tmp, so a socket there is invisible to the relay's
+				// status-discovery shell-out; /run/user is NOT remapped by
+				// PrivateTmp, so both the PTY's tmux and discovery (which sets the
+				// same TMUX_TMPDIR) share a reachable socket. Only when the dir
+				// exists, to avoid breaking environments without a user runtime dir.
+				if !envHas(env, "TMUX_TMPDIR") {
+					runDir := fmt.Sprintf("/run/user/%d", uid)
+					if fi, err := os.Stat(runDir); err == nil && fi.IsDir() {
+						env = append(env, "TMUX_TMPDIR="+runDir)
+					}
 				}
 			}
 		}
