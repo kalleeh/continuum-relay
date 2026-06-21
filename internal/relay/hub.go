@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,6 +125,42 @@ func mergeDiscovered(relayRecords, discovered []SessionRecord) []SessionRecord {
 // with personal sessions like "hermes" or "main" extremely unlikely.
 var legacySessionRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]+-\d+$`)
 
+// tmuxDiscoveryCommand builds the `tmux list-sessions` invocation used for
+// discovery. Crucially it must reach the *user's* tmux server.
+//
+// The relay's systemd unit sets PrivateTmp=true, which gives the relay process
+// an isolated /tmp — so a bare `tmux` (whose default socket is /tmp/tmux-<uid>/
+// default) sees an empty namespace and finds nothing, even though the user's
+// sessions exist on the host /tmp. The PTY spawn already solves this by running
+// under `systemd-run --user --scope` (the user-manager context, real /tmp), so
+// we mirror that here. XDG_RUNTIME_DIR is set so systemd-run can reach the user
+// bus, matching terminal/server.go's handleConn.
+//
+// Falls back to a bare `tmux` on macOS, when CONTINUUM_NO_USER_SCOPE=1, or when
+// systemd-run isn't on PATH (dev environments where PrivateTmp isn't in play).
+func tmuxDiscoveryCommand(ctx context.Context, format string) *exec.Cmd {
+	listArgs := []string{"list-sessions", "-F", format}
+
+	if runtime.GOOS != "linux" || os.Getenv("CONTINUUM_NO_USER_SCOPE") == "1" {
+		return exec.CommandContext(ctx, "tmux", listArgs...)
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		return exec.CommandContext(ctx, "tmux", listArgs...)
+	}
+
+	args := append([]string{"--user", "--scope", "--quiet", "--collect", "--pipe", "--", "tmux"}, listArgs...)
+	cmd := exec.CommandContext(ctx, "systemd-run", args...)
+	// systemd-run --user needs the user bus; the relay's env may lack
+	// XDG_RUNTIME_DIR (PrivateTmp hides /run/user from $TMPDIR views). Point it
+	// at the real per-user runtime dir, same as the PTY-spawn path.
+	if os.Getenv("XDG_RUNTIME_DIR") == "" {
+		if uid := os.Getuid(); uid > 0 {
+			cmd.Env = append(os.Environ(), fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid))
+		}
+	}
+	return cmd
+}
+
 // discoverTmuxSessions runs `tmux list-sessions` and returns records for
 // sessions not managed by the relay. These are marked with Source="system".
 func discoverTmuxSessions() []SessionRecord {
@@ -135,18 +172,8 @@ func discoverTmuxSessions() []SessionRecord {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	detectedUser := os.Getenv("CONTINUUM_USER")
-	if detectedUser == "" {
-		if out, err := exec.CommandContext(ctx, "stat", "-f", "%Su", "/dev/console").Output(); err == nil {
-			detectedUser = strings.TrimSpace(string(out))
-		}
-	}
-	if detectedUser != "" && detectedUser != "root" {
-		cmd = exec.CommandContext(ctx, "su", "-", detectedUser, "-c", "tmux list-sessions -F '#{session_name}\t#{session_activity}\t#{session_attached}'")
-	} else {
-		cmd = exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}\t#{session_attached}")
-	}
+	const format = "#{session_name}\t#{session_activity}\t#{session_attached}"
+	cmd := tmuxDiscoveryCommand(ctx, format)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
