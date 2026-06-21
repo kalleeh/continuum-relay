@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,6 +41,11 @@ type Hub struct {
 	// Each registers a buffered send channel drained by its own writer.
 	clientMu sync.Mutex
 	clients  map[string]chan []byte
+
+	// Dedup set for permission-prompt notifications, keyed by request id, so the
+	// same prompt never notifies twice. Bounded in NotifyPermission.
+	notifyMu        sync.Mutex
+	notifiedPermIDs map[string]bool
 }
 
 func NewHub(apnsClient *apns.Client) *Hub {
@@ -427,49 +433,78 @@ func (h *Hub) RunDetector(ctx context.Context, poll, idleAfter time.Duration) {
 	}
 }
 
-// SendPush fires an APNs SESSION_FINISHED notification to all registered devices.
-// Currently unused: the previous trigger lived in the now-removed Claude Code
-// stream-json relay path. Sessions are PTY/tmux-backed and have no event the
-// relay can observe, so push is dormant until a new trigger is wired (e.g. an
-// iOS-side Live Activity → APNs path or a tmux pane-output watcher).
-// Kept here so the device-registration wire (RegisterDevice) and APNs config
-// remain in place for whichever trigger lands next.
-func (h *Hub) SendPush(sessionName, resultSummary string) {
+// NotifyPermission fires a single "tool permission needed" alert for a session.
+// This is the one reliably-detectable attention event: the Ollama chat proxy
+// CREATES the permission request server-side (unique 128-bit id), so we know the
+// exact moment a prompt is waiting. Deduped per requestID so a retry/re-entry
+// never double-notifies, and collapse-id coalesces on the device.
+//
+// (Claude Code/Kiro/Goose permission prompts render only inside the tmux TUI —
+// the relay can't see them — so this covers Ollama sessions only.)
+func (h *Hub) NotifyPermission(sessionName, toolName, requestID string) {
 	if h.apnsClient == nil {
 		return
 	}
+	// Dedup: skip if we already notified for this exact request id.
+	h.notifyMu.Lock()
+	if h.notifiedPermIDs == nil {
+		h.notifiedPermIDs = make(map[string]bool)
+	}
+	if h.notifiedPermIDs[requestID] {
+		h.notifyMu.Unlock()
+		return
+	}
+	h.notifiedPermIDs[requestID] = true
+	// Bound the set so it can't grow unbounded over a long-lived relay.
+	if len(h.notifiedPermIDs) > 256 {
+		h.notifiedPermIDs = map[string]bool{requestID: true}
+	}
+	h.notifyMu.Unlock()
+
+	body := "A tool is waiting for your approval"
+	if toolName != "" {
+		body = toolName + " is waiting for your approval"
+	}
+	h.sendAlert(apns.Alert{
+		Title:     sessionName,
+		Body:      body,
+		SessionID: sessionName,
+		Category:  "SESSION_PERMISSION",
+		// One pending-permission notification per session at a time; a new prompt
+		// replaces the previous one on the device rather than stacking.
+		CollapseID: "perm:" + sessionName,
+	})
+}
+
+// sendAlert fans an alert out to every registered device token, dropping tokens
+// APNs reports as permanently dead (ErrTokenInvalid).
+func (h *Hub) sendAlert(alert apns.Alert) {
 	h.tokenMu.Lock()
 	tokens := make([]string, len(h.deviceTokens))
 	copy(tokens, h.deviceTokens)
 	h.tokenMu.Unlock()
 
-	title := sessionName
-	body := resultSummary
-	if body == "" {
-		body = "Session finished"
-	}
-
 	for _, tok := range tokens {
 		tok := tok
 		go func() {
-			if err := h.apnsClient.Send(tok, title, body, sessionName); err != nil {
-				if strings.Contains(err.Error(), "410") {
-					// APNs says token is invalid or expired; remove it
-					h.tokenMu.Lock()
-					for i, t := range h.deviceTokens {
-						if t == tok {
-							h.deviceTokens = append(h.deviceTokens[:i], h.deviceTokens[i+1:]...)
-							slog.Info("removed stale APNs device token", "token_suffix", tok[max(0, len(tok)-8):])
-							break
-						}
-					}
-					h.tokenMu.Unlock()
-				} else {
-					slog.Warn("APNs push failed", "err", err, "token_suffix", tok[max(0, len(tok)-8):])
-				}
-			} else {
-				slog.Info("APNs push sent", "session", sessionName)
+			err := h.apnsClient.Send(tok, alert)
+			if err == nil {
+				slog.Info("APNs alert sent", "session", alert.SessionID)
+				return
 			}
+			if errors.Is(err, apns.ErrTokenInvalid) {
+				h.tokenMu.Lock()
+				for i, t := range h.deviceTokens {
+					if t == tok {
+						h.deviceTokens = append(h.deviceTokens[:i], h.deviceTokens[i+1:]...)
+						slog.Info("removed dead APNs device token", "token_suffix", tok[max(0, len(tok)-8):])
+						break
+					}
+				}
+				h.tokenMu.Unlock()
+				return
+			}
+			slog.Warn("APNs alert failed", "err", err, "token_suffix", tok[max(0, len(tok)-8):])
 		}()
 	}
 }

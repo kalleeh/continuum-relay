@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -69,24 +70,46 @@ func New(keyPath, keyID, teamID, bundleID string) (*Client, error) {
 	}, nil
 }
 
-// Send delivers a SESSION_FINISHED alert to the given APNs device token.
-// sessionID is included in the payload so the app can open the correct session.
-func (c *Client) Send(deviceToken, title, body, sessionID string) error {
+// ErrTokenInvalid signals the device token is permanently dead (410 Unregistered
+// or 400 BadDeviceToken) and callers should delete it. Distinct from transient
+// failures (429/500/503/403-JWT), which are worth retrying with the same token.
+var ErrTokenInvalid = errors.New("apns: device token invalid")
+
+// Alert describes a user-visible alert push.
+type Alert struct {
+	Title     string
+	Body      string
+	SessionID string // payload "sessionId" — lets the app open the right session on tap
+	Category  string // UNNotificationCategory id; defaults to "SESSION_FINISHED"
+	// CollapseID coalesces notifications: a new push with the same id replaces an
+	// earlier one still displayed/pending on the device (≤64 bytes). Empty = no
+	// collapsing. Used to dedup repeats of the same logical event per session.
+	CollapseID string
+}
+
+// Send delivers a user-visible alert to the given APNs device token. Returns
+// ErrTokenInvalid (wrapped) when APNs reports the token is dead, so the caller
+// can drop it; other non-2xx responses return a transient error.
+func (c *Client) Send(deviceToken string, alert Alert) error {
 	jwt, err := c.getJWT()
 	if err != nil {
 		return fmt.Errorf("building APNs JWT: %w", err)
 	}
 
+	category := alert.Category
+	if category == "" {
+		category = "SESSION_FINISHED"
+	}
 	payload := map[string]any{
 		"aps": map[string]any{
 			"alert": map[string]string{
-				"title": title,
-				"body":  body,
+				"title": alert.Title,
+				"body":  alert.Body,
 			},
 			"sound":    "default",
-			"category": "SESSION_FINISHED",
+			"category": category,
 		},
-		"sessionId": sessionID,
+		"sessionId": alert.SessionID,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -100,7 +123,17 @@ func (c *Client) Send(deviceToken, title, body, sessionID string) error {
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("apns-topic", c.bundleID)
 	req.Header.Set("apns-push-type", "alert")
-	req.Header.Set("apns-priority", "10")
+	req.Header.Set("apns-priority", "10") // user-visible alert → deliver immediately
+	// Finite expiration so a queued alert isn't delivered hours late, after it
+	// stopped being relevant. ~1h is plenty for an "attention needed" prompt.
+	req.Header.Set("apns-expiration", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+	if alert.CollapseID != "" {
+		id := alert.CollapseID
+		if len(id) > 64 { // APNs hard limit
+			id = id[:64]
+		}
+		req.Header.Set("apns-collapse-id", id)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -119,6 +152,11 @@ func (c *Client) Send(deviceToken, title, body, sessionID string) error {
 		// next Send rebuilds a fresh token instead of failing for up to 55 min.
 		if resp.StatusCode == http.StatusForbidden {
 			c.invalidateJWT()
+		}
+		// 410 Unregistered / 400 BadDeviceToken mean the token is permanently
+		// dead — signal the caller to delete it.
+		if resp.StatusCode == http.StatusGone || errResp.Reason == "BadDeviceToken" {
+			return fmt.Errorf("%w (%d %s)", ErrTokenInvalid, resp.StatusCode, errResp.Reason)
 		}
 		return fmt.Errorf("APNs returned %d: %s", resp.StatusCode, errResp.Reason)
 	}

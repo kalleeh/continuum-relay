@@ -145,7 +145,7 @@ func (s *Server) handleChatProxy(w http.ResponseWriter, r *http.Request) {
 			} else {
 				// Send permission request inline to iOS client. Bind it to this
 				// client's IP so only the originating device can approve it.
-				allowed := s.requestInlinePermission(ctx, w, flusher, auth.ClientIP(r), name, tc.Function.Arguments)
+				allowed := s.requestInlinePermission(ctx, w, flusher, auth.ClientIP(r), req.Model, name, tc.Function.Arguments)
 				if allowed {
 					slog.Info("tool permission granted", "name", name)
 					result = tools.ExecuteUnsafe(call)
@@ -201,7 +201,7 @@ func (s *Server) handleChatProxy(w http.ResponseWriter, r *http.Request) {
 
 // requestInlinePermission sends a permission request as an NDJSON line in the
 // HTTP streaming response, then waits for the response via /api/permission.
-func (s *Server) requestInlinePermission(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, ownerIP, toolName string, args json.RawMessage) bool {
+func (s *Server) requestInlinePermission(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, ownerIP, sessionName, toolName string, args json.RawMessage) bool {
 	id := randomPermID()
 
 	ch := s.broker.RegisterPending(id, ownerIP)
@@ -216,6 +216,12 @@ func (s *Server) requestInlinePermission(ctx context.Context, w http.ResponseWri
 	})
 	fmt.Fprintf(w, "%s\n", line)
 	flusher.Flush()
+
+	// Fire a push so the user knows a prompt is waiting even if the app isn't
+	// foreground. Deduped per request id; the inline NDJSON line above remains
+	// the in-app path. Only meaningful for Ollama (the relay can't see Claude
+	// Code/Kiro TUI prompts).
+	s.hub.NotifyPermission(sessionName, toolName, id)
 
 	timer := time.NewTimer(60 * time.Second)
 	defer timer.Stop()
