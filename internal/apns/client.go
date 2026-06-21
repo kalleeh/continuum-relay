@@ -125,6 +125,62 @@ func (c *Client) Send(deviceToken, title, body, sessionID string) error {
 	return nil
 }
 
+// SendLiveActivity updates an iOS Live Activity via APNs. activityToken is the
+// per-activity push token the app obtained from Activity.pushTokenUpdates (NOT
+// the device token). contentState is the JSON the widget's ContentState decodes
+// (status / isRunning / lastActivityAt). The apns-topic for Live Activities is
+// the app bundle id with the ".push-type.liveactivity" suffix.
+//
+// Returns the HTTP status reason on failure; a 410 means the token is stale
+// (activity ended) and the caller should drop it.
+func (c *Client) SendLiveActivity(activityToken string, contentState map[string]any, staleAfter time.Duration) error {
+	jwt, err := c.getJWT()
+	if err != nil {
+		return fmt.Errorf("building APNs JWT: %w", err)
+	}
+
+	aps := map[string]any{
+		"timestamp":     time.Now().Unix(),
+		"event":         "update",
+		"content-state": contentState,
+	}
+	if staleAfter > 0 {
+		aps["stale-date"] = time.Now().Add(staleAfter).Unix()
+	}
+	data, err := json.Marshal(map[string]any{"aps": aps})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apnsURL+activityToken, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("apns-topic", c.bundleID+".push-type.liveactivity")
+	req.Header.Set("apns-push-type", "liveactivity")
+	req.Header.Set("apns-priority", "10")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("APNs request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		if resp.StatusCode == http.StatusForbidden {
+			c.invalidateJWT()
+		}
+		return fmt.Errorf("APNs returned %d: %s", resp.StatusCode, errResp.Reason)
+	}
+	return nil
+}
+
 // invalidateJWT clears the cached token so the next getJWT rebuilds it.
 func (c *Client) invalidateJWT() {
 	c.mu.Lock()

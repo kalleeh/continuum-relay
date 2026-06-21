@@ -58,6 +58,10 @@ func NewServer(addr string, authenticator *auth.Authenticator, apnsClient *apns.
 	}
 }
 
+// Hub exposes the server's session hub so main can run the status detector loop
+// against it (poll tmux activity → PublishStatus).
+func (s *Server) Hub() *Hub { return s.hub }
+
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)

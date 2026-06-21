@@ -22,21 +22,24 @@ var (
 	sessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 	tokenRe       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	apnsTokenRe   = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	// Live Activity push tokens are hex but longer/variable vs device tokens.
+	activityTokenRe = regexp.MustCompile(`^[0-9a-fA-F]{64,512}$`)
 )
 
 type ClientMessage struct {
-	Type        string `json:"type"`
-	Name        string `json:"name,omitempty"`
-	CWD         string `json:"cwd,omitempty"`
-	SessionType string `json:"sessionType,omitempty"`
-	Session     string `json:"session,omitempty"`
-	GitHubToken string `json:"githubToken,omitempty"`
-	Slug        string `json:"slug,omitempty"`
-	ID          string `json:"id,omitempty"`           // tool_permission_response
-	Allow       bool   `json:"allow,omitempty"`        // tool_permission_response
-	Token       string `json:"token,omitempty"`        // rotate_token
-	DeviceToken string `json:"device_token,omitempty"` // register_device
-	Force       bool   `json:"force,omitempty"`        // remove_project: delete even with unsaved work
+	Type          string `json:"type"`
+	Name          string `json:"name,omitempty"`
+	CWD           string `json:"cwd,omitempty"`
+	SessionType   string `json:"sessionType,omitempty"`
+	Session       string `json:"session,omitempty"`
+	GitHubToken   string `json:"githubToken,omitempty"`
+	Slug          string `json:"slug,omitempty"`
+	ID            string `json:"id,omitempty"`             // tool_permission_response
+	Allow         bool   `json:"allow,omitempty"`          // tool_permission_response
+	Token         string `json:"token,omitempty"`          // rotate_token
+	DeviceToken   string `json:"device_token,omitempty"`   // register_device
+	ActivityToken string `json:"activity_token,omitempty"` // register_activity (Live Activity push token)
+	Force         bool   `json:"force,omitempty"`          // remove_project: delete even with unsaved work
 }
 
 func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
@@ -63,6 +66,25 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		}
 	}
 	defer unsubscribe()
+
+	// Register this client for hub-wide broadcasts (session_status from the
+	// detector). Separate from the per-session outputCh above.
+	statusCh := make(chan []byte, 16)
+	hub.RegisterClient(clientID, statusCh)
+	defer hub.UnregisterClient(clientID)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case data := <-statusCh:
+				if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
 	// Goroutine: forward session output → WebSocket
 	outDone := make(chan struct{})
@@ -189,6 +211,18 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			}
 			hub.RegisterDevice(msg.DeviceToken)
 
+		case "register_activity":
+			// Live Activity push token for a session. Empty token unregisters
+			// (activity ended). Tokens are hex but variable length, so validate
+			// loosely (hex, sane bounds) rather than the fixed device-token regex.
+			if !sessionNameRe.MatchString(msg.Session) {
+				continue
+			}
+			if msg.ActivityToken != "" && !activityTokenRe.MatchString(msg.ActivityToken) {
+				continue
+			}
+			hub.RegisterActivity(msg.Session, msg.ActivityToken)
+
 		case "rotate_token":
 			if !tokenRe.MatchString(msg.Token) {
 				writeError(ctx, conn, "invalid_token", "token must be 64 lowercase hex chars")
@@ -269,9 +303,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				"unpushed":    st.Unpushed,
 			})
 
-		// Note: tool-permission responses come back over HTTP POST /api/permission
-		// (handlePermissionResponse), not this WebSocket, so they can be bound to
-		// the originating client's IP. There is intentionally no permission case here.
+			// Note: tool-permission responses come back over HTTP POST /api/permission
+			// (handlePermissionResponse), not this WebSocket, so they can be bound to
+			// the originating client's IP. There is intentionally no permission case here.
 		}
 	}
 	<-outDone

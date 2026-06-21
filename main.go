@@ -248,6 +248,11 @@ func main() {
 		}
 	}()
 
+	// Status detector: poll tmux activity and publish session_status
+	// (working/idle) over the WebSocket + APNs Live Activity push. Cheap
+	// (one `tmux list-sessions` per tick); 5s poll, 20s idle threshold.
+	go server.Hub().RunDetector(ctx, 5*time.Second, 20*time.Second)
+
 	// ── Wait for shutdown signal ──────────────────────────────────────────────
 	<-sigCh
 	slog.Info("received shutdown signal, shutting down…")

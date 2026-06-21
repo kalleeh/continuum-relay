@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/continuum-app/continuum-relay/internal/apns"
+	"github.com/continuum-app/continuum-relay/internal/detector"
 )
 
 const maxDeviceTokens = 10 // prevent unbounded growth on reconnects
@@ -26,13 +27,41 @@ type Hub struct {
 	tokenMu      sync.Mutex
 	deviceTokens []string
 	apnsClient   *apns.Client // nil if APNs not configured
+
+	// Per-session Live Activity push tokens (session name → APNs activity token),
+	// registered by the iOS client after it starts an activity. Distinct from
+	// deviceTokens: these target a specific on-screen Live Activity for
+	// background content-state updates.
+	activityMu     sync.Mutex
+	activityTokens map[string]string
+
+	// Connected clients, for fanning session_status out to foreground apps.
+	// Each registers a buffered send channel drained by its own writer.
+	clientMu sync.Mutex
+	clients  map[string]chan []byte
 }
 
 func NewHub(apnsClient *apns.Client) *Hub {
 	return &Hub{
-		sessions:   make(map[string]*Session),
-		apnsClient: apnsClient,
+		sessions:       make(map[string]*Session),
+		apnsClient:     apnsClient,
+		activityTokens: make(map[string]string),
+		clients:        make(map[string]chan []byte),
 	}
+}
+
+// RegisterClient adds a connected client's send channel to the broadcast set.
+func (h *Hub) RegisterClient(clientID string, ch chan []byte) {
+	h.clientMu.Lock()
+	h.clients[clientID] = ch
+	h.clientMu.Unlock()
+}
+
+// UnregisterClient removes a client from the broadcast set.
+func (h *Hub) UnregisterClient(clientID string) {
+	h.clientMu.Lock()
+	delete(h.clients, clientID)
+	h.clientMu.Unlock()
 }
 
 func (h *Hub) ListSessions() []SessionRecord {
@@ -250,6 +279,124 @@ func (h *Hub) RegisterDevice(token string) {
 	}
 	h.deviceTokens = append(h.deviceTokens, token)
 	slog.Info("device registered for push", "token_suffix", token[max(0, len(token)-8):])
+}
+
+// RegisterActivity stores the Live Activity push token for a session, so the
+// detector loop can push background content-state updates to that specific
+// on-screen activity. An empty token unregisters (e.g. the activity ended).
+func (h *Hub) RegisterActivity(sessionName, token string) {
+	h.activityMu.Lock()
+	defer h.activityMu.Unlock()
+	if token == "" {
+		delete(h.activityTokens, sessionName)
+		return
+	}
+	h.activityTokens[sessionName] = token
+	slog.Info("live activity registered", "session", sessionName, "token_suffix", token[max(0, len(token)-8):])
+}
+
+// PublishStatus is the detector's single dispatch point for a status change:
+// it broadcasts session_status to connected clients (foreground updates) AND
+// pushes an APNs Live Activity content-state update (background updates).
+func (h *Hub) PublishStatus(name string, status SessionStatus, lastActivity time.Time) {
+	msg, _ := json.Marshal(map[string]any{
+		"type":         "session_status",
+		"session":      name,
+		"status":       string(status),
+		"lastActivity": lastActivity.UTC().Format(time.RFC3339),
+	})
+	h.clientMu.Lock()
+	for _, ch := range h.clients {
+		select {
+		case ch <- msg:
+		default: // slow client — drop this status update rather than block
+		}
+	}
+	h.clientMu.Unlock()
+
+	h.pushLiveActivity(name, status, lastActivity)
+}
+
+// pushLiveActivity sends a Live Activity content-state update for the session,
+// if APNs is configured and the app registered an activity token for it.
+func (h *Hub) pushLiveActivity(name string, status SessionStatus, lastActivity time.Time) {
+	if h.apnsClient == nil {
+		return
+	}
+	h.activityMu.Lock()
+	token := h.activityTokens[name]
+	h.activityMu.Unlock()
+	if token == "" {
+		return
+	}
+	contentState := map[string]any{
+		"status":         statusDisplayLabel(status),
+		"isRunning":      status == StatusRunning,
+		"lastActivityAt": lastActivity.UTC().Format(time.RFC3339),
+	}
+	go func() {
+		// 8h stale window: the activity self-ticks its timer, so even if no
+		// further push arrives the OS keeps it sensible, then marks it stale.
+		if err := h.apnsClient.SendLiveActivity(token, contentState, 8*time.Hour); err != nil {
+			if strings.Contains(err.Error(), "410") {
+				h.activityMu.Lock()
+				delete(h.activityTokens, name)
+				h.activityMu.Unlock()
+				slog.Info("dropped stale live-activity token", "session", name)
+			} else {
+				slog.Warn("live activity push failed", "session", name, "err", err)
+			}
+		}
+	}()
+}
+
+// statusDisplayLabel maps a relay status to the human label the iOS widget shows.
+func statusDisplayLabel(s SessionStatus) string {
+	switch s {
+	case StatusRunning:
+		return "Running"
+	case StatusIdle:
+		return "Idle"
+	case StatusFinished:
+		return "Finished"
+	default:
+		return string(s)
+	}
+}
+
+// SessionActivitySnapshot returns the current session→last-activity map from
+// tmux, for the detector to classify. Reuses discoverTmuxSessions' parsing.
+func SessionActivitySnapshot() map[string]time.Time {
+	out := make(map[string]time.Time)
+	for _, rec := range discoverTmuxSessions() {
+		out[rec.Name] = rec.LastActivity
+	}
+	return out
+}
+
+// RunDetector polls tmux session activity on an interval and publishes a
+// session_status (working/idle) on every classified transition. Blocks until
+// ctx is cancelled. idleAfter is how long a session must be quiet before it's
+// classified idle; poll is the tmux sampling cadence.
+func (h *Hub) RunDetector(ctx context.Context, poll, idleAfter time.Duration) {
+	tracker := detector.New(idleAfter)
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	slog.Info("status detector started", "poll", poll, "idleAfter", idleAfter)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, ch := range tracker.Update(time.Now(), SessionActivitySnapshot()) {
+				status := StatusIdle
+				if ch.State == detector.Working {
+					status = StatusRunning
+				}
+				h.PublishStatus(ch.Name, status, ch.LastActivity)
+			}
+		}
+	}
 }
 
 // SendPush fires an APNs SESSION_FINISHED notification to all registered devices.
