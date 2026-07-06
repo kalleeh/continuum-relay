@@ -122,10 +122,15 @@ func AllTools() []ToolDefinition {
 }
 
 // SafeTools are tools that can be executed without user permission.
+//
+// read_file is deliberately NOT here: a prompt-injection delivered through
+// web_fetch/web_search content can instruct the model to call read_file on a
+// local secret, and since both were previously auto-executed the result was
+// silently returned with no user visibility. read_file now requires the same
+// inline approval as run_code/write_file (see ExecuteUnsafe).
 var SafeTools = map[string]bool{
 	"web_search": true,
 	"web_fetch":  true,
-	"read_file":  true,
 }
 
 // Execute runs ONLY safe (read-only) tools. Dangerous tools (run_code, write_file)
@@ -160,6 +165,16 @@ func Execute(call ToolCall) ToolResult {
 		}
 		return executeWebFetch(args.URL)
 
+	default:
+		return ToolResult{Name: call.Name, Error: "unknown tool"}
+	}
+}
+
+// ExecuteUnsafe runs dangerous tools (run_code, write_file, read_file) that
+// require prior user permission. The caller MUST have obtained explicit user
+// approval before calling this function. This is never called from Execute().
+func ExecuteUnsafe(call ToolCall) ToolResult {
+	switch call.Name {
 	case "read_file":
 		var args struct {
 			Path string `json:"path"`
@@ -168,17 +183,6 @@ func Execute(call ToolCall) ToolResult {
 			return ToolResult{Name: call.Name, Error: "invalid arguments"}
 		}
 		return executeReadFile(args.Path)
-
-	default:
-		return ToolResult{Name: call.Name, Error: "unknown tool"}
-	}
-}
-
-// ExecuteUnsafe runs dangerous tools (run_code, write_file) that require
-// prior user permission. The caller MUST have obtained explicit user approval
-// before calling this function. This is never called from Execute().
-func ExecuteUnsafe(call ToolCall) ToolResult {
-	switch call.Name {
 	case "run_code":
 		var args struct {
 			Language string `json:"language"`

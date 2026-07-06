@@ -59,6 +59,20 @@ type toolEvent struct {
 	Result string          `json:"result"`
 }
 
+// maxOllamaResponseBytes caps how much of a single non-streaming Ollama
+// response body the tool-calling loop will buffer. Mirrors the cap
+// web_fetch.go applies to its own upstream reads.
+const maxOllamaResponseBytes = 2 * 1024 * 1024 // 2MB
+
+// writeProxyError emits an NDJSON error line so the client can distinguish
+// "backend failed mid-round" from "model finished early" instead of seeing
+// the stream simply end with no signal.
+func writeProxyError(w http.ResponseWriter, flusher http.Flusher, msg string) {
+	line, _ := json.Marshal(map[string]string{"error": msg})
+	fmt.Fprintf(w, "%s\n", line)
+	flusher.Flush()
+}
+
 func ollamaHost() string {
 	if h := os.Getenv("OLLAMA_HOST"); h != "" {
 		return h
@@ -112,19 +126,28 @@ func (s *Server) handleChatProxy(w http.ResponseWriter, r *http.Request) {
 		ollamaReq, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/chat", bytes.NewReader(payload))
 		if err != nil {
 			slog.Error("failed to create ollama request", "round", i, "err", err)
+			writeProxyError(w, flusher, "internal error building request")
 			return
 		}
 		ollamaReq.Header.Set("Content-Type", "application/json")
 		resp, err := ollamaClient.Do(ollamaReq)
 		if err != nil {
 			slog.Error("ollama request failed", "round", i, "err", err)
+			writeProxyError(w, flusher, "backend request failed")
 			return
 		}
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOllamaResponseBytes))
 		resp.Body.Close()
+		if err != nil {
+			slog.Error("failed to read ollama response", "round", i, "err", err)
+			writeProxyError(w, flusher, "backend response read failed")
+			return
+		}
 
 		var chatResp ollamaChatResponse
 		if json.Unmarshal(respBody, &chatResp) != nil {
+			slog.Error("failed to decode ollama response", "round", i)
+			writeProxyError(w, flusher, "backend returned invalid response")
 			return
 		}
 
@@ -177,11 +200,13 @@ func (s *Server) handleChatProxy(w http.ResponseWriter, r *http.Request) {
 	payload, _ := json.Marshal(req)
 	ollamaReq, err := http.NewRequestWithContext(ctx, http.MethodPost, host+"/api/chat", bytes.NewReader(payload))
 	if err != nil {
+		writeProxyError(w, flusher, "internal error building request")
 		return
 	}
 	ollamaReq.Header.Set("Content-Type", "application/json")
 	resp, err := ollamaClient.Do(ollamaReq)
 	if err != nil {
+		writeProxyError(w, flusher, "backend request failed")
 		return
 	}
 	defer resp.Body.Close()

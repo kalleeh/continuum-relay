@@ -9,7 +9,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -49,26 +48,8 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var (
-		mu                sync.Mutex
-		subscribedSession *Session
-		outputCh          <-chan []byte
-		chReady           = make(chan struct{}, 1)
-	)
-
-	unsubscribe := func() {
-		mu.Lock()
-		defer mu.Unlock()
-		if subscribedSession != nil {
-			subscribedSession.Unsubscribe(clientID)
-			subscribedSession = nil
-			outputCh = nil
-		}
-	}
-	defer unsubscribe()
-
 	// Register this client for hub-wide broadcasts (session_status from the
-	// detector). Separate from the per-session outputCh above.
+	// detector).
 	statusCh := make(chan []byte, 16)
 	hub.RegisterClient(clientID, statusCh)
 	defer hub.UnregisterClient(clientID)
@@ -82,40 +63,6 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 					cancel()
 					return
 				}
-			}
-		}
-	}()
-
-	// Goroutine: forward session output → WebSocket
-	outDone := make(chan struct{})
-	go func() {
-		defer close(outDone)
-		for {
-			mu.Lock()
-			ch := outputCh
-			mu.Unlock()
-			if ch == nil {
-				select {
-				case <-ctx.Done():
-					return
-				case <-chReady:
-					continue
-				}
-			}
-			select {
-			case data, ok := <-ch:
-				if !ok {
-					mu.Lock()
-					outputCh = nil
-					mu.Unlock()
-					continue
-				}
-				if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-					cancel()
-					return
-				}
-			case <-ctx.Done():
-				return
 			}
 		}
 	}()
@@ -158,19 +105,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				writeError(ctx, conn, "invalid_name", "Session name invalid")
 				continue
 			}
-			s, err := hub.CreateSession(msg.Name, msg.CWD, msg.SessionType)
-			if err != nil {
+			if _, err := hub.CreateSession(msg.Name, msg.CWD, msg.SessionType); err != nil {
 				writeError(ctx, conn, "create_failed", err.Error())
 				continue
-			}
-			unsubscribe()
-			mu.Lock()
-			subscribedSession = s
-			outputCh = s.Subscribe(clientID)
-			mu.Unlock()
-			select {
-			case chReady <- struct{}{}:
-			default:
 			}
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
 
@@ -179,23 +116,10 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				writeError(ctx, conn, "invalid_name", "Session name invalid")
 				continue
 			}
-			s, ok := hub.GetSession(msg.Name)
-			if !ok {
+			if _, ok := hub.GetSession(msg.Name); !ok {
 				writeError(ctx, conn, "not_found", "Session not found")
 				continue
 			}
-			unsubscribe()
-			mu.Lock()
-			subscribedSession = s
-			outputCh = s.Subscribe(clientID)
-			mu.Unlock()
-			select {
-			case chReady <- struct{}{}:
-			default:
-			}
-
-		case "detach_session":
-			unsubscribe()
 
 		case "delete_session":
 			if !sessionNameRe.MatchString(msg.Name) {
@@ -308,7 +232,6 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			// the originating client's IP. There is intentionally no permission case here.
 		}
 	}
-	<-outDone
 }
 
 // rewriteEnvFile atomically updates CONTINUUM_TOKEN in /etc/continuum/env,

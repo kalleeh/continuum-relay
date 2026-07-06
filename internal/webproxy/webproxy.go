@@ -18,14 +18,31 @@ package webproxy
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const prefix = "/proxy/"
+
+// backendTransport bounds connection setup and time-to-first-response-header
+// to a local dev server, independent of the relay's global 10-minute
+// WriteTimeout (chosen for file-transfer/chat-proxy use cases, not this).
+// It deliberately does NOT bound total request duration: once headers arrive,
+// a streaming response, long-poll, or WebSocket upgrade (HMR/live-reload,
+// explicitly supported by ReverseProxy below) can run indefinitely. A hung or
+// never-listening dev server is caught by these two timeouts instead of
+// holding a goroutine/connection open for up to 10 minutes with no signal.
+var backendTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout: 5 * time.Second,
+	}).DialContext,
+	ResponseHeaderTimeout: 30 * time.Second,
+}
 
 // blockedPorts are never proxiable. The proxy dials 127.0.0.1:{port}, so beyond
 // the relay's own surfaces it must NOT become a pivot to local infrastructure
@@ -78,6 +95,7 @@ func Handler() http.HandlerFunc {
 
 		target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + strconv.Itoa(port)}
 		proxy := &httputil.ReverseProxy{
+			Transport: backendTransport,
 			Director: func(req *http.Request) {
 				req.URL.Scheme = target.Scheme
 				req.URL.Host = target.Host

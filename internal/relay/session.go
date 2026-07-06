@@ -26,16 +26,14 @@ type SessionRecord struct {
 }
 
 // Session is a relay-side bookkeeping record for a tmux-backed session.
-// The actual PTY lives in the terminal subsystem (port 7681) — Session
-// only tracks the name, working directory, and any subscribers that want
-// to be notified when the session list changes. There is no subprocess.
+// The actual PTY lives in the terminal subsystem (port 7681) — Session only
+// tracks the name, working directory, and status. Session output flows
+// entirely over the terminal WebSocket as raw VT100 bytes; there is no
+// subprocess and no per-session pub/sub here.
 type Session struct {
 	Record SessionRecord
 
-	mu          sync.RWMutex
-	subscribers map[string]chan []byte // clientID → notification channel
-
-	hub *Hub // set by Hub.CreateSession; reserved for future push-notification dispatch
+	mu sync.RWMutex
 }
 
 func NewSession(name, cwd string) *Session {
@@ -47,25 +45,7 @@ func NewSession(name, cwd string) *Session {
 			WorkingDirectory: cwd,
 			LastActivity:     time.Now(),
 		},
-		subscribers: make(map[string]chan []byte),
 	}
-}
-
-func (s *Session) Subscribe(clientID string) <-chan []byte {
-	ch := make(chan []byte, 128)
-	s.mu.Lock()
-	s.subscribers[clientID] = ch
-	s.mu.Unlock()
-	return ch
-}
-
-func (s *Session) Unsubscribe(clientID string) {
-	s.mu.Lock()
-	if ch, ok := s.subscribers[clientID]; ok {
-		close(ch)
-		delete(s.subscribers, clientID)
-	}
-	s.mu.Unlock()
 }
 
 // projectFromCWD extracts the project name from a working directory path.

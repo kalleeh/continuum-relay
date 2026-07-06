@@ -269,7 +269,6 @@ func (h *Hub) CreateSession(name, cwd, sessionType string) (*Session, error) {
 	}
 
 	s := NewSession(name, cwd)
-	s.hub = h
 	s.Record.Type = sessionType
 	h.sessions[name] = s
 	return s, nil

@@ -329,14 +329,26 @@ func (s *Server) handleConn(ctx context.Context, conn *websocket.Conn, remoteAdd
 			if len(msg) > 1 {
 				// Log stdin messages until we capture the first real command (ends in \r).
 				// This lets us see exactly what the iOS app types into the shell on connect.
+				// Only the expected tmux attach/new-session invocation is logged verbatim;
+				// anything else (a pasted secret before the shell prompt is ready, a buggy
+				// adapter sending unexpected input) is redacted rather than written to disk.
 				if !stdinLogged {
 					preview := strings.TrimRight(string(msg[1:]), "\r\n")
 					if len(preview) > 0 {
 						stdinLogged = true
-						if len(preview) > 300 {
-							preview = preview[:300] + "…"
+						// TerminalAdapter always prepends this exact prefix before its
+						// tmux attach/new-session command (see TerminalAdapter.swift
+						// sendTmuxAttach). Anything else on this first line — a pasted
+						// secret before the shell prompt is ready, a buggy adapter
+						// sending unexpected input — is redacted rather than logged.
+						if strings.HasPrefix(preview, "tmux set-option -g mouse on") {
+							if len(preview) > 300 {
+								preview = preview[:300] + "…"
+							}
+							slog.Debug("terminal stdin cmd", "ip", remoteAddr, "data", preview)
+						} else {
+							slog.Debug("terminal stdin cmd", "ip", remoteAddr, "data", "[REDACTED: unexpected first stdin line]")
 						}
-						slog.Debug("terminal stdin cmd", "ip", remoteAddr, "data", preview)
 					}
 				}
 				ptmx.Write(msg[1:]) //nolint:errcheck

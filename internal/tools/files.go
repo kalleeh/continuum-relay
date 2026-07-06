@@ -28,6 +28,27 @@ var sensitivePatterns = []string{
 	"id_ed25519",
 	"authorized_keys",
 	"known_hosts",
+	// Package manager / DB client credential files.
+	".npmrc",
+	".pgpass",
+	".my.cnf",
+	".pypirc",
+	".cargo/credentials",
+	// Cloud provider credential/config files.
+	".azure",
+	"gcloud/credentials",
+	"gcloud/legacy_credentials",
+	"service-account.json",
+	"service_account.json",
+	".boto",
+	// Infra-as-code state (often contains plaintext secrets/outputs).
+	"terraform.tfstate",
+	".terraform",
+	// Generic secret-shaped filenames.
+	".htpasswd",
+	"credentials.json",
+	"secrets.yaml",
+	"secrets.yml",
 }
 
 // sensitiveExactPaths are full paths that must never be accessed.
