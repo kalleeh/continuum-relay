@@ -125,11 +125,12 @@ func mergeDiscovered(relayRecords, discovered []SessionRecord) []SessionRecord {
 	return records
 }
 
-// legacySessionRe matches iOS-app-generated tmux session names in the
-// pre-cx- scheme: <type>-<digits>, e.g. "claudeCode-6195", "terminal-6738".
-// This is safe to use for discovery because the random suffix makes collisions
-// with personal sessions like "hermes" or "main" extremely unlikely.
-var legacySessionRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]+-\d+$`)
+// discoverableNameRe bounds which tmux session names discovery will surface:
+// the same charset/length grammar the relay and iOS client enforce everywhere
+// else (client.go sessionNameRe, iOS InputValidator). A session named outside
+// it (spaces, etc.) would list fine but fail validation on attach, so it's
+// skipped here instead of surfacing an entry the app can never open.
+var discoverableNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 // tmuxDiscoveryCommand builds the `tmux list-sessions` invocation used for
 // discovery. Crucially it must reach the *user's* tmux server.
@@ -195,24 +196,18 @@ func discoverTmuxSessions() []SessionRecord {
 			continue
 		}
 		name := parts[0]
-		// Surface relay-managed sessions only. Two naming schemes are supported:
-		//   1. cx-<type> prefix — used after the iOS app is rebuilt with cx- prefix
-		//   2. <type>-<digits> pattern — legacy scheme used by current iOS app
-		//      (e.g. claudeCode-6195, terminal-6738); safe to surface because the
-		//      random suffix makes collisions with user sessions extremely unlikely.
-		// User sessions like "hermes" and "main" are excluded by both checks.
-		isCxPrefixed := strings.HasPrefix(name, "cx-")
-		isLegacyNamed := legacySessionRe.MatchString(name)
-		if !isCxPrefixed && !isLegacyNamed {
-			continue
-		}
-		if isCxPrefixed {
+		// Surface every tmux session on the user's server, not just relay-created
+		// ones. Foreign sessions (a user's own tmux, cmux's numeric sessions, …)
+		// are tagged source="system"; the iOS list hides them behind its
+		// "show system sessions" toggle and attaches them by their bare tmux name
+		// (TerminalAdapter isDiscovered path), so surfacing them is safe.
+		if strings.HasPrefix(name, "cx-") {
 			// Strip the "cx-" prefix before returning to the client so the app sees
 			// the logical name (e.g. "terminal") rather than the internal tmux name.
 			name = strings.TrimPrefix(name, "cx-")
 		}
-		// Skip sessions with names that don't pass validation (too long, etc.)
-		if len(name) > 64 {
+		// Skip names the attach path would reject anyway (validation grammar).
+		if !discoverableNameRe.MatchString(name) {
 			continue
 		}
 
