@@ -113,6 +113,35 @@ And run:
 sudo continuum-relay   # needs root or CAP_NET_ADMIN to create the TUN
 ```
 
+### Troubleshooting: macOS lists sessions but attach says "no sessions"
+
+**Symptom:** the iOS app shows your tmux sessions, but attaching to any of
+them fails with "no sessions" (tmux split-brain).
+
+**Cause:** the relay is installed twice under the same launchd label — once
+as a root LaunchDaemon (`/Library/LaunchDaemons/com.kalleh.continuum-relay.plist`)
+and once as a user LaunchAgent (`~/Library/LaunchAgents/com.kalleh.continuum-relay.plist`),
+typically from running the installer with and without `sudo` at different
+times. Both processes race for UDP/51820 at boot; when the root daemon wins
+the bind, PTY shells spawn as root, so `tmux attach` talks to root's empty
+tmux server (`/tmp/tmux-0`) while session discovery lists the console user's
+sessions (`/tmp/tmux-501`).
+
+**Detect:**
+
+```bash
+ps aux | grep '[c]ontinuum-relay'   # two relay processes = duplicate install
+ls -l /Library/LaunchDaemons/com.kalleh.continuum-relay.plist \
+      ~/Library/LaunchAgents/com.kalleh.continuum-relay.plist
+```
+
+**Fix:** remove the root LaunchDaemon and keep the user LaunchAgent:
+
+```bash
+sudo launchctl bootout system/com.kalleh.continuum-relay \
+  && sudo rm /Library/LaunchDaemons/com.kalleh.continuum-relay.plist
+```
+
 ## Commands
 
 ```

@@ -1362,6 +1362,19 @@ WGCONF
       local agents_dir="$HOME/Library/LaunchAgents"
       mkdir -p "$agents_dir"
 
+      # Guard against a duplicate install: a root LaunchDaemon (from
+      # install.sh) would race this LaunchAgent for UDP/51820 at boot. If the
+      # root daemon wins, PTYs spawn as root and tmux attach hits root's empty
+      # tmux server — the app lists sessions but attach fails with "no
+      # sessions". Warn, don't fail — see README "Troubleshooting".
+      if [[ -f /Library/LaunchDaemons/com.kalleh.continuum-relay.plist ]]; then
+        gum style --foreground 3 "WARNING: /Library/LaunchDaemons/com.kalleh.continuum-relay.plist also exists."
+        gum style --foreground 3 "  Two relay services will race for UDP/51820 at boot (tmux split-brain)."
+        gum style --foreground 3 "  Keep only one — remove the root LaunchDaemon with:"
+        gum style --foreground 3 "    sudo launchctl bootout system/com.kalleh.continuum-relay"
+        gum style --foreground 3 "    sudo rm /Library/LaunchDaemons/com.kalleh.continuum-relay.plist"
+      fi
+
       # continuum-relay LaunchAgent
       cat > "${agents_dir}/com.continuum.relay.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>

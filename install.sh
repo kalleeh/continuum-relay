@@ -422,6 +422,23 @@ configure_linux_firewall() {
 install_macos_service() {
   PLIST=/Library/LaunchDaemons/com.kalleh.continuum-relay.plist
   USER_HOME="$(eval echo "~$RELAY_USER")"
+
+  # Guard against a duplicate install: a user LaunchAgent with the same label
+  # would race this LaunchDaemon for UDP/51820 at boot. If the root daemon
+  # wins, PTYs spawn as root and tmux attach hits root's empty tmux server
+  # while discovery lists the console user's sessions ("no sessions" on
+  # attach). Warn, don't fail — see README "Troubleshooting" for the fix.
+  AGENT_PLIST="$USER_HOME/Library/LaunchAgents/com.kalleh.continuum-relay.plist"
+  if [ -f "$AGENT_PLIST" ]; then
+    echo "WARNING: $AGENT_PLIST also exists." >&2
+    echo "  Installing this LaunchDaemon alongside it means two relays race" >&2
+    echo "  for UDP/51820 at boot (tmux split-brain: sessions listed but" >&2
+    echo "  attach fails with 'no sessions'). Keep only one — to remove the" >&2
+    echo "  LaunchAgent:" >&2
+    echo "    launchctl bootout gui/\$(id -u $RELAY_USER)/com.kalleh.continuum-relay" >&2
+    echo "    rm '$AGENT_PLIST'" >&2
+  fi
+
   USER_LOG="$USER_HOME/.continuum"
   mkdir -p "$USER_LOG"
   chown "$RELAY_USER" "$USER_LOG" 2>/dev/null || true
