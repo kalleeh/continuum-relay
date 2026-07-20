@@ -15,18 +15,32 @@ func TestMergeDiscovered_DropsProjectContainerDuplicate(t *testing.T) {
 	// The reported bug: a project-backed Claude Code session is hosted in tmux
 	// session cx-myproject with the agent in a window named claudeCode-1234.
 	// The relay record carries Project="myproject"; discovery surfaces the
-	// container as name="myproject", type="terminal", source="system".
+	// container by its real tmux name "cx-myproject" (never stripped), which
+	// must dedup against the record's project via the logical name.
 	relay := []SessionRecord{
 		{Name: "claudeCode-1234", Type: "claudeCode", Project: "myproject", Source: "relay"},
 	}
 	discovered := []SessionRecord{
-		{Name: "myproject", Type: "terminal", Source: "system"},
+		{Name: "cx-myproject", Type: "terminal", Source: "system"},
 	}
 
 	got := names(mergeDiscovered(relay, discovered))
 	want := []string{"claudeCode-1234"}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("project container should be suppressed: got %v, want %v", got, want)
+	}
+}
+
+func TestMergeDiscovered_KeepsOrphanedCxSessionByRealName(t *testing.T) {
+	// After a relay restart, an app-created cx- session has no relay record.
+	// It must surface under its REAL tmux name so bare-name attach works —
+	// stripping it to "104" would point the client at a session that doesn't
+	// exist in tmux.
+	got := names(mergeDiscovered(nil, []SessionRecord{
+		{Name: "cx-104", Type: "terminal", Source: "system"},
+	}))
+	if len(got) != 1 || got[0] != "cx-104" {
+		t.Fatalf("orphaned cx- session should surface by real name: got %v", got)
 	}
 }
 
@@ -48,8 +62,8 @@ func TestMergeDiscovered_KeepsGenuineSystemSession(t *testing.T) {
 		{Name: "claudeCode-1234", Type: "claudeCode", Project: "myproject", Source: "relay"},
 	}
 	discovered := []SessionRecord{
-		{Name: "myproject", Type: "terminal", Source: "system"}, // phantom — dropped
-		{Name: "hermes-42", Type: "terminal", Source: "system"}, // genuine — kept
+		{Name: "cx-myproject", Type: "terminal", Source: "system"}, // phantom — dropped
+		{Name: "hermes-42", Type: "terminal", Source: "system"},    // genuine — kept
 	}
 
 	got := names(mergeDiscovered(relay, discovered))
@@ -59,13 +73,14 @@ func TestMergeDiscovered_KeepsGenuineSystemSession(t *testing.T) {
 }
 
 func TestMergeDiscovered_NoProjectStillDedupsByName(t *testing.T) {
-	// A flat (non-project) agent session uses tmux session cx-<sessionName>,
-	// which strips back to exactly the relay name — dedup by name covers it and
-	// the empty Project must not suppress unrelated sessions.
+	// A flat (non-project) agent session uses tmux session cx-<sessionName>;
+	// its logical name is exactly the relay record's name — dedup via the
+	// logical name covers it, and the empty Project must not suppress
+	// unrelated sessions.
 	relay := []SessionRecord{{Name: "claudeCode-9", Type: "claudeCode", Source: "relay"}}
 	discovered := []SessionRecord{
-		{Name: "claudeCode-9", Type: "terminal", Source: "system"}, // same name — dropped
-		{Name: "other", Type: "terminal", Source: "system"},        // kept
+		{Name: "cx-claudeCode-9", Type: "terminal", Source: "system"}, // same logical name — dropped
+		{Name: "other", Type: "terminal", Source: "system"},           // kept
 	}
 
 	got := names(mergeDiscovered(relay, discovered))

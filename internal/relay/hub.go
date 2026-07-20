@@ -92,16 +92,19 @@ func (h *Hub) ListSessions() []SessionRecord {
 
 // mergeDiscovered appends discovered ("system") tmux sessions to the relay's
 // own records, dropping any discovered session that's already represented by a
-// live relay record. A discovered session is a duplicate when either:
+// live relay record. Discovered names are real tmux names (never stripped —
+// the iOS client attaches discovered sessions by bare name, so a surfaced name
+// must exist in tmux verbatim). A discovered session is a duplicate when its
+// name — or, for a relay-created "cx-<X>" session, the logical name <X> —
+// matches either:
 //
-//   - its name matches a relay record's logical name (same session, e.g. after a
-//     relay restart where h.sessions was rebuilt), or
-//   - its name matches a relay record's project. A project-backed agent session
-//     is hosted in a tmux session named cx-<project> with the agent in a *window*;
-//     `tmux list-sessions` sees cx-<project> and strips it to <project>, which
-//     never matches the relay record's logical window name. Without the project
-//     check that container slips through as a phantom type=terminal/source=system
-//     duplicate alongside the real agent session.
+//   - a relay record's logical name (same session, e.g. after a relay restart
+//     where h.sessions was rebuilt), or
+//   - a relay record's project. A project-backed agent session is hosted in a
+//     tmux session named cx-<project> with the agent in a *window*; that
+//     container never matches the relay record's logical window name, so
+//     without the project check it slips through as a phantom
+//     type=terminal/source=system duplicate alongside the real agent session.
 //
 // Kept pure (no tmux shellout, no lock) so the dedup logic is unit-testable.
 func mergeDiscovered(relayRecords, discovered []SessionRecord) []SessionRecord {
@@ -117,7 +120,9 @@ func mergeDiscovered(relayRecords, discovered []SessionRecord) []SessionRecord {
 	records := make([]SessionRecord, 0, len(relayRecords)+len(discovered))
 	records = append(records, relayRecords...)
 	for _, sys := range discovered {
-		if relayNames[sys.Name] || relayProjects[sys.Name] {
+		logical := strings.TrimPrefix(sys.Name, "cx-")
+		if relayNames[sys.Name] || relayProjects[sys.Name] ||
+			relayNames[logical] || relayProjects[logical] {
 			continue
 		}
 		records = append(records, sys)
@@ -201,11 +206,13 @@ func discoverTmuxSessions() []SessionRecord {
 		// are tagged source="system"; the iOS list hides them behind its
 		// "show system sessions" toggle and attaches them by their bare tmux name
 		// (TerminalAdapter isDiscovered path), so surfacing them is safe.
-		if strings.HasPrefix(name, "cx-") {
-			// Strip the "cx-" prefix before returning to the client so the app sees
-			// the logical name (e.g. "terminal") rather than the internal tmux name.
-			name = strings.TrimPrefix(name, "cx-")
-		}
+		//
+		// Surface the REAL tmux name, cx- prefix included. Stripping it here made
+		// relay-created sessions orphaned by a restart unattachable: they surface
+		// as source="system", the client attaches by the surfaced name verbatim,
+		// and the stripped name doesn't exist in tmux ("no sessions").
+		// mergeDiscovered dedups cx-<X> against live relay records for <X>.
+		//
 		// Skip names the attach path would reject anyway (validation grammar).
 		if !discoverableNameRe.MatchString(name) {
 			continue
