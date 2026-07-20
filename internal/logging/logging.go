@@ -27,7 +27,7 @@ func Setup(logPath string) {
 		_ = os.Rename(logPath, logPath+".1")
 	}
 
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0640)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
 		slog.Warn("could not open log file, using stderr", "path", logPath, "err", err)
