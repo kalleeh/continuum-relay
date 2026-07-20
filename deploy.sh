@@ -1375,12 +1375,21 @@ WGCONF
         gum style --foreground 3 "    sudo rm /Library/LaunchDaemons/com.kalleh.continuum-relay.plist"
       fi
 
+      # Migrate from the old label: earlier versions of this script installed
+      # the LaunchAgent as com.continuum.relay. Boot it out and remove the old
+      # plist before writing the new one so two agents never race for UDP/51820.
+      if [[ -f "${agents_dir}/com.continuum.relay.plist" ]]; then
+        launchctl bootout "gui/$(id -u)/com.continuum.relay" 2>/dev/null || true
+        rm -f "${agents_dir}/com.continuum.relay.plist"
+        gum style --foreground 3 "Migrated LaunchAgent label com.continuum.relay → com.kalleh.continuum-relay"
+      fi
+
       # continuum-relay LaunchAgent
-      cat > "${agents_dir}/com.continuum.relay.plist" << PLIST
+      cat > "${agents_dir}/com.kalleh.continuum-relay.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.continuum.relay</string>
+  <key>Label</key><string>com.kalleh.continuum-relay</string>
   <key>ProgramArguments</key><array>
     <string>/usr/local/bin/continuum-relay</string>
   </array>
@@ -1395,9 +1404,9 @@ WGCONF
   <key>StandardOutPath</key><string>/var/log/continuum/relay.log</string>
 </dict></plist>
 PLIST
-      chmod 600 "${agents_dir}/com.continuum.relay.plist"
+      chmod 600 "${agents_dir}/com.kalleh.continuum-relay.plist"
 
-      launchctl load "${agents_dir}/com.continuum.relay.plist"
+      launchctl load "${agents_dir}/com.kalleh.continuum-relay.plist"
       gum style --foreground 2 "✓ Continuum services loaded as LaunchAgents"
     fi
 
@@ -1568,7 +1577,7 @@ LOGROTATE
   echo ""
   gum style --foreground 3 "WireGuard is managed by continuum-relay, which starts automatically on boot."
   if [[ "$os" == "Darwin" ]]; then
-    gum style --foreground 3 "  launchctl start com.continuum.relay  # to restart manually"
+    gum style --foreground 3 "  launchctl start com.kalleh.continuum-relay  # to restart manually"
   else
     gum style --foreground 3 "  sudo systemctl restart continuum-relay  # to restart manually"
   fi
@@ -1583,8 +1592,10 @@ local_destroy() {
   if [[ "$os" == "Darwin" ]]; then
     local agents_dir="$HOME/Library/LaunchAgents"
     launchctl unload "${agents_dir}/com.continuum.ttyd.plist"  2>/dev/null || true
+    launchctl unload "${agents_dir}/com.kalleh.continuum-relay.plist" 2>/dev/null || true
+    # Also clean up the pre-rename label in case this install predates it.
     launchctl unload "${agents_dir}/com.continuum.relay.plist" 2>/dev/null || true
-    rm -f "${agents_dir}/com.continuum.ttyd.plist" "${agents_dir}/com.continuum.relay.plist"
+    rm -f "${agents_dir}/com.continuum.ttyd.plist" "${agents_dir}/com.kalleh.continuum-relay.plist" "${agents_dir}/com.continuum.relay.plist"
     sudo wg-quick down "$(get_brew_prefix)/etc/wireguard/wg0.conf" 2>/dev/null || true
     sudo rm -f "$(get_brew_prefix)/etc/wireguard/wg0.conf"
     sudo rm -rf /etc/continuum
