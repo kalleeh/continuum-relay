@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -150,11 +151,20 @@ var discoverableNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 //
 // Falls back to a bare `tmux` (no override) on macOS or when there's no
 // per-user runtime dir, where PrivateTmp isn't in play.
+//
+// The command also forces a UTF-8 locale. In the C/POSIX locale tmux does not
+// treat the tab in our -F format as printable and substitutes "_" for it, so
+// every output line comes back as "name_activity_attached" — the tab-split
+// parse then yields one field, every session is discarded, and the client sees
+// an empty list. Service managers start the relay with no LANG (launchd and
+// systemd both do), so this is the default case in production, not an edge case.
 func tmuxDiscoveryCommand(ctx context.Context, format string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", format)
+	env := append(os.Environ(), "LC_ALL=C.UTF-8")
 	if dir := tmuxSocketDir(); dir != "" {
-		cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+dir)
+		env = append(env, "TMUX_TMPDIR="+dir)
 	}
+	cmd.Env = env
 	return cmd
 }
 
@@ -189,15 +199,25 @@ func discoverTmuxSessions() []SessionRecord {
 	cmd := tmuxDiscoveryCommand(ctx, format)
 	out, err := cmd.Output()
 	if err != nil {
+		// "no server running" is the normal no-sessions case, not a fault.
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || !bytes.Contains(ee.Stderr, []byte("no server running")) {
+			slog.Warn("tmux discovery failed", "err", err)
+		}
 		return nil
 	}
 	var records []SessionRecord
+	var unparseable int
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}
 		parts := strings.SplitN(line, "\t", 3)
 		if len(parts) < 3 {
+			// Every session silently vanishing here is what made the locale bug
+			// (tmux replacing the tab separator) invisible for weeks. Count and
+			// report instead of dropping quietly.
+			unparseable++
 			continue
 		}
 		name := parts[0]
@@ -235,6 +255,10 @@ func discoverTmuxSessions() []SessionRecord {
 			LastActivity: lastActivity,
 			Source:       "system",
 		})
+	}
+	if unparseable > 0 {
+		slog.Warn("tmux discovery dropped unparseable lines; check the tmux -F separator and the relay's locale",
+			"dropped", unparseable, "kept", len(records))
 	}
 	return records
 }
