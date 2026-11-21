@@ -39,6 +39,8 @@ type ClientMessage struct {
 	DeviceToken   string `json:"device_token,omitempty"`   // register_device
 	ActivityToken string `json:"activity_token,omitempty"` // register_activity (Live Activity push token)
 	Force         bool   `json:"force,omitempty"`          // remove_project: delete even with unsaved work
+	Key           string `json:"key,omitempty"`            // send_key: up | down | enter | escape
+	Lines         int    `json:"lines,omitempty"`          // capture_screen: how many trailing lines
 }
 
 func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
@@ -209,6 +211,19 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 				continue
 			}
 			writeJSON(ctx, conn, map[string]string{"type": "project_removed", "name": msg.Name})
+
+		case "send_key":
+			if err := hub.SendKey(msg.Session, msg.Key); err != nil {
+				writeError(ctx, conn, "send_key_failed", err.Error())
+			}
+
+		case "capture_screen":
+			lines, err := hub.CaptureScreen(msg.Session, msg.Lines)
+			if err != nil {
+				writeError(ctx, conn, "capture_failed", err.Error())
+				continue
+			}
+			writeJSON(ctx, conn, map[string]any{"type": "screen", "session": msg.Session, "lines": lines})
 
 		case "project_status":
 			st, err := projects.ProjectStatus(msg.Name)

@@ -159,13 +159,7 @@ var discoverableNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 // an empty list. Service managers start the relay with no LANG (launchd and
 // systemd both do), so this is the default case in production, not an edge case.
 func tmuxDiscoveryCommand(ctx context.Context, format string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", format)
-	env := append(os.Environ(), "LC_ALL=C.UTF-8")
-	if dir := tmuxSocketDir(); dir != "" {
-		env = append(env, "TMUX_TMPDIR="+dir)
-	}
-	cmd.Env = env
-	return cmd
+	return tmuxCommand(ctx, "list-sessions", "-F", format)
 }
 
 // tmuxSocketDir returns the TMUX_TMPDIR the relay and its PTY spawns should use
