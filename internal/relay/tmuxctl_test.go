@@ -151,6 +151,22 @@ func TestSendKeyAndCaptureAgainstTmux(t *testing.T) {
 		t.Errorf("discovered session did not receive literal y7, screen: %q", got)
 	}
 
+	// Dictated text is typed literally and does not submit itself.
+	if err := h.SendText("flat", "-fix the don't; rm -rf $HOME && echo Enter"); err != nil {
+		t.Fatalf("send text: %v", err)
+	}
+	if got := screen("flat"); !strings.Contains(got, "-fix the don't; rm -rf $HOME && echo Enter") {
+		t.Errorf("flat session did not receive the literal text, screen: %q", got)
+	}
+	for _, bad := range []string{"", "line one\nline two", "tab\there", "esc\x1b[A", strings.Repeat("a", maxSendTextBytes+1)} {
+		if err := h.SendText("flat", bad); err == nil {
+			t.Errorf("text %q should be refused", bad)
+		}
+	}
+	if err := h.SendText("a b", "hello"); err == nil {
+		t.Error("an invalid session name should be refused")
+	}
+
 	if err := h.SendKey("missing", "up"); err == nil {
 		t.Error("sending to a session that does not exist should fail")
 	}

@@ -41,6 +41,7 @@ type ClientMessage struct {
 	Force         bool   `json:"force,omitempty"`          // remove_project: delete even with unsaved work
 	Key           string `json:"key,omitempty"`            // send_key: up | down | enter | escape | one of a-z0-9
 	Lines         int    `json:"lines,omitempty"`          // capture_screen: how many trailing lines
+	Text          string `json:"text,omitempty"`           // send_text: typed into the session, no Enter
 }
 
 func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
@@ -220,6 +221,11 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		case "send_key":
 			if err := hub.SendKey(msg.Session, msg.Key); err != nil {
 				writeError(ctx, conn, "send_key_failed", err.Error())
+			}
+
+		case "send_text":
+			if err := hub.SendText(msg.Session, msg.Text); err != nil {
+				writeError(ctx, conn, "send_text_failed", err.Error())
 			}
 
 		case "capture_screen":

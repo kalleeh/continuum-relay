@@ -11,8 +11,8 @@ import (
 )
 
 // Remote control of a session's TUI for clients without a terminal (the
-// Continuum desk device): send one of a few named keys, and read back the last
-// lines on screen so the user can see the menu they are answering.
+// Continuum desk device): send one of a few named keys, type dictated text, and
+// read back the last lines on screen so the user can see what they are answering.
 //
 // This grants nothing the terminal endpoint doesn't already: the same token
 // opens a full PTY on :7681. Keys are restricted to a fixed set of named keys
@@ -105,6 +105,25 @@ func (h *Hub) SendKey(name, key string) error {
 		return err
 	}
 	return fmt.Errorf("unsupported key %q", key)
+}
+
+const maxSendTextBytes = 2000
+
+// SendText types text into the session's active pane exactly as given, without pressing
+// Enter: the caller sends that separately (send_key "enter") once the user has seen the text
+// in place. Control characters are refused, so the text cannot submit itself or drive the TUI.
+func (h *Hub) SendText(name, text string) error {
+	if text == "" || len(text) > maxSendTextBytes {
+		return fmt.Errorf("text must be 1 to %d bytes", maxSendTextBytes)
+	}
+	for _, r := range text {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("text contains control characters")
+		}
+	}
+	// -l: literal, never looked up as key names. "--": text starting with "-" is not an option.
+	_, err := h.runOnSession(name, "send-keys", "-l", "-t", "{target}", "--", text)
+	return err
 }
 
 // CaptureScreen returns the last non-empty lines currently visible in the
