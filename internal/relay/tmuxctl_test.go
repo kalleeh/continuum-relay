@@ -49,7 +49,7 @@ func TestLastScreenLines(t *testing.T) {
 
 func TestSendKeyRejectsBadInput(t *testing.T) {
 	h := NewHub(nil)
-	for _, key := range []string{"", "Enter", "C-c", "up; rm -rf /", "q"} {
+	for _, key := range []string{"", "Enter", "C-c", "up; rm -rf /", "Q", "yy", "-", ";", "é"} {
 		if err := h.SendKey("api", key); err == nil || !strings.Contains(err.Error(), "unsupported key") {
 			t.Errorf("key %q: want unsupported-key error, got %v", key, err)
 		}
@@ -144,6 +144,11 @@ func TestSendKeyAndCaptureAgainstTmux(t *testing.T) {
 	press("bare7", "down", "enter") // discovered session, bare name
 	if got := screen("bare7"); !strings.Contains(got, "^[[B") && !strings.Contains(got, "^[OB") {
 		t.Errorf("discovered session did not receive down, screen: %q", got)
+	}
+
+	press("bare7", "y", "7") // single characters, typed literally
+	if got := screen("bare7"); !strings.Contains(got, "y7") {
+		t.Errorf("discovered session did not receive literal y7, screen: %q", got)
 	}
 
 	if err := h.SendKey("missing", "up"); err == nil {

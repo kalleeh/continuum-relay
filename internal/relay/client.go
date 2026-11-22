@@ -39,7 +39,7 @@ type ClientMessage struct {
 	DeviceToken   string `json:"device_token,omitempty"`   // register_device
 	ActivityToken string `json:"activity_token,omitempty"` // register_activity (Live Activity push token)
 	Force         bool   `json:"force,omitempty"`          // remove_project: delete even with unsaved work
-	Key           string `json:"key,omitempty"`            // send_key: up | down | enter | escape
+	Key           string `json:"key,omitempty"`            // send_key: up | down | enter | escape | one of a-z0-9
 	Lines         int    `json:"lines,omitempty"`          // capture_screen: how many trailing lines
 }
 
@@ -101,6 +101,11 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		switch msg.Type {
 		case "list_sessions":
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
+			// Follow the list with each session's current working/idle state:
+			// status is otherwise only pushed when it changes.
+			for _, status := range hub.StatusSnapshot() {
+				_ = conn.Write(ctx, websocket.MessageText, status)
+			}
 
 		case "create_session":
 			if !sessionNameRe.MatchString(msg.Name) {

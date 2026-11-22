@@ -43,6 +43,12 @@ type Hub struct {
 	clientMu sync.Mutex
 	clients  map[string]chan []byte
 
+	// The status detector's tracker, once RunDetector has started; lets a
+	// client be told the current working/idle state instead of waiting for
+	// the next transition.
+	trackerMu sync.Mutex
+	tracker   *detector.Tracker
+
 	// Dedup set for permission-prompt notifications, keyed by request id, so the
 	// same prompt never notifies twice. Bounded in NotifyPermission.
 	notifyMu        sync.Mutex
@@ -333,6 +339,42 @@ func (h *Hub) SessionListJSON() []byte {
 	return msg
 }
 
+func sessionStatusJSON(name string, status SessionStatus, lastActivity time.Time) []byte {
+	msg, _ := json.Marshal(map[string]any{
+		"type":         "session_status",
+		"session":      name,
+		"status":       string(status),
+		"lastActivity": lastActivity.UTC().Format(time.RFC3339),
+	})
+	return msg
+}
+
+func statusFromState(state detector.State) SessionStatus {
+	if state == detector.Working {
+		return StatusRunning
+	}
+	return StatusIdle
+}
+
+// StatusSnapshot returns one session_status message per session the detector
+// is tracking, carrying its current state. Sent after a session list so a
+// client that connected while a session was already working shows it as such
+// (PublishStatus only fires on transitions). Empty until the detector runs.
+func (h *Hub) StatusSnapshot() [][]byte {
+	h.trackerMu.Lock()
+	tracker := h.tracker
+	h.trackerMu.Unlock()
+	if tracker == nil {
+		return nil
+	}
+	changes := tracker.Snapshot()
+	msgs := make([][]byte, 0, len(changes))
+	for _, ch := range changes {
+		msgs = append(msgs, sessionStatusJSON(ch.Name, statusFromState(ch.State), ch.LastActivity))
+	}
+	return msgs
+}
+
 // RegisterDevice stores an APNs device token for push delivery.
 // Deduplicates and caps at maxDeviceTokens.
 func (h *Hub) RegisterDevice(token string) {
@@ -369,12 +411,7 @@ func (h *Hub) RegisterActivity(sessionName, token string) {
 // it broadcasts session_status to connected clients (foreground updates) AND
 // pushes an APNs Live Activity content-state update (background updates).
 func (h *Hub) PublishStatus(name string, status SessionStatus, lastActivity time.Time) {
-	msg, _ := json.Marshal(map[string]any{
-		"type":         "session_status",
-		"session":      name,
-		"status":       string(status),
-		"lastActivity": lastActivity.UTC().Format(time.RFC3339),
-	})
+	msg := sessionStatusJSON(name, status, lastActivity)
 	h.clientMu.Lock()
 	for _, ch := range h.clients {
 		select {
@@ -450,6 +487,9 @@ func SessionActivitySnapshot() map[string]time.Time {
 // classified idle; poll is the tmux sampling cadence.
 func (h *Hub) RunDetector(ctx context.Context, poll, idleAfter time.Duration) {
 	tracker := detector.New(idleAfter)
+	h.trackerMu.Lock()
+	h.tracker = tracker
+	h.trackerMu.Unlock()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	slog.Info("status detector started", "poll", poll, "idleAfter", idleAfter)
@@ -459,11 +499,7 @@ func (h *Hub) RunDetector(ctx context.Context, poll, idleAfter time.Duration) {
 			return
 		case <-ticker.C:
 			for _, ch := range tracker.Update(time.Now(), SessionActivitySnapshot()) {
-				status := StatusIdle
-				if ch.State == detector.Working {
-					status = StatusRunning
-				}
-				h.PublishStatus(ch.Name, status, ch.LastActivity)
+				h.PublishStatus(ch.Name, statusFromState(ch.State), ch.LastActivity)
 			}
 		}
 	}

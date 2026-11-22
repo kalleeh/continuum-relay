@@ -15,8 +15,9 @@ import (
 // lines on screen so the user can see the menu they are answering.
 //
 // This grants nothing the terminal endpoint doesn't already: the same token
-// opens a full PTY on :7681. Keys are restricted to a fixed allowlist so no
-// client-supplied string ever reaches tmux as a key argument.
+// opens a full PTY on :7681. Keys are restricted to a fixed set of named keys
+// plus single characters a-z / 0-9 (for "[y/n]" style prompts), so nothing a
+// client sends can be interpreted by tmux as anything but that one key.
 
 // tmuxKeyNames maps the wire names accepted in send_key to tmux key names.
 var tmuxKeyNames = map[string]string{
@@ -91,14 +92,19 @@ func (h *Hub) runOnSession(name string, args ...string) ([]byte, error) {
 	return nil, errors.New("session not found in tmux")
 }
 
-// SendKey presses one allowlisted key in the session's active pane.
+// SendKey presses one key in the session's active pane: a named key from
+// tmuxKeyNames, or a single lowercase letter or digit typed literally.
 func (h *Hub) SendKey(name, key string) error {
-	tmuxKey, ok := tmuxKeyNames[key]
-	if !ok {
-		return fmt.Errorf("unsupported key %q", key)
+	if tmuxKey, ok := tmuxKeyNames[key]; ok {
+		_, err := h.runOnSession(name, "send-keys", "-t", "{target}", tmuxKey)
+		return err
 	}
-	_, err := h.runOnSession(name, "send-keys", "-t", "{target}", tmuxKey)
-	return err
+	if len(key) == 1 && (key[0] >= 'a' && key[0] <= 'z' || key[0] >= '0' && key[0] <= '9') {
+		// -l: literal, so the character is never looked up as a tmux key name.
+		_, err := h.runOnSession(name, "send-keys", "-l", "-t", "{target}", key)
+		return err
+	}
+	return fmt.Errorf("unsupported key %q", key)
 }
 
 // CaptureScreen returns the last non-empty lines currently visible in the

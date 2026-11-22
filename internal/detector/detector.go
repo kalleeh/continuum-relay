@@ -12,6 +12,7 @@
 package detector
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -87,6 +88,21 @@ func (t *Tracker) Update(now time.Time, activity map[string]time.Time) []Change 
 		}
 	}
 	return changes
+}
+
+// Snapshot returns the current State of every tracked session, ordered by name.
+// Update only reports transitions, so a client that connects mid-way through a
+// long task would otherwise not learn that the session is working until its
+// next change.
+func (t *Tracker) Snapshot() []Change {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]Change, 0, len(t.seen))
+	for name, e := range t.seen {
+		out = append(out, Change{Name: name, State: e.state, LastActivity: e.lastActivity})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Forget drops a session from tracking (e.g. when its Live Activity ends), so if
