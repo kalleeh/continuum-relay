@@ -162,6 +162,21 @@ func tmuxDiscoveryCommand(ctx context.Context, format string) *exec.Cmd {
 	return tmuxCommand(ctx, "list-sessions", "-F", format)
 }
 
+// latestActivity returns the newest of the space-separated Unix timestamps in
+// field, or the zero time if none parses.
+func latestActivity(field string) time.Time {
+	var newest int64
+	for _, f := range strings.Fields(field) {
+		if ts, err := strconv.ParseInt(f, 10, 64); err == nil && ts > newest {
+			newest = ts
+		}
+	}
+	if newest == 0 {
+		return time.Time{}
+	}
+	return time.Unix(newest, 0)
+}
+
 // tmuxSocketDir returns the TMUX_TMPDIR the relay and its PTY spawns should use
 // so tmux sockets live somewhere visible despite PrivateTmp. Empty string means
 // "use tmux's default" (macOS / no per-user runtime dir).
@@ -189,7 +204,12 @@ func discoverTmuxSessions() []SessionRecord {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	const format = "#{session_name}\t#{session_activity}\t#{session_attached}"
+	// Activity: #{session_activity} only advances on client input (a keypress or
+	// an attach), never on pane output, so an agent working unattended looked
+	// idle. Output advances #{window_activity}, per window; the #{W:} loop lists
+	// every window's so a busy agent in a background window still counts. The
+	// field is a space-separated list and the newest timestamp wins.
+	const format = "#{session_name}\t#{session_activity} #{W:#{window_activity} }\t#{session_attached}"
 	cmd := tmuxDiscoveryCommand(ctx, format)
 	out, err := cmd.Output()
 	if err != nil {
@@ -237,10 +257,7 @@ func discoverTmuxSessions() []SessionRecord {
 			status = StatusRunning
 		}
 
-		var lastActivity time.Time
-		if ts, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-			lastActivity = time.Unix(ts, 0)
-		}
+		lastActivity := latestActivity(parts[1])
 
 		records = append(records, SessionRecord{
 			Name:         name,

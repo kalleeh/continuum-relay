@@ -1,8 +1,9 @@
 // Package detector classifies tmux session activity as "working" vs "idle"
-// using tmux's own per-session #{session_activity} timestamp — the same signal
-// the relay already reads when listing sessions. This is deliberately simpler
-// and more robust than scraping pane content or /proc state: tmux bumps
-// session_activity whenever any window in the session produces output, across
+// using tmux's own activity timestamps — the same signal the relay already
+// reads when listing sessions (the newest of the session's client activity and
+// each window's output activity; see discoverTmuxSessions). This is
+// deliberately simpler and more robust than scraping pane content or /proc
+// state: tmux bumps a window's activity whenever it produces output, across
 // all session types (claude/kiro/goose/shell), with no target-window mapping
 // or prompt-string guessing.
 //

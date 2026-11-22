@@ -150,3 +150,67 @@ func TestSendKeyAndCaptureAgainstTmux(t *testing.T) {
 		t.Error("sending to a session that does not exist should fail")
 	}
 }
+
+func TestLatestActivity(t *testing.T) {
+	cases := map[string]int64{
+		"1700000000":                        1700000000,
+		"1700000000 1700000050 1700000020 ": 1700000050,
+		"1700000050 ":                       1700000050,
+		"":                                  0,
+		"garbage 12 x":                      12,
+	}
+	for field, want := range cases {
+		got := latestActivity(field)
+		if want == 0 && !got.IsZero() || want != 0 && got.Unix() != want {
+			t.Errorf("latestActivity(%q) = %v, want unix %d", field, got, want)
+		}
+	}
+}
+
+// Output in a background window must advance the session's last activity:
+// that is the only signal that an unattended agent is working.
+func TestDiscoveryActivityFollowsPaneOutput(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	sockDir, err := os.MkdirTemp("/tmp", "cxt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	t.Setenv("TMUX_TMPDIR", sockDir)
+	t.Setenv("TMUX", "")
+	ctx := context.Background()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := tmuxCommand(ctx, args...).CombinedOutput(); err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, out)
+		}
+	}
+	t.Cleanup(func() { _ = tmuxCommand(ctx, "kill-server").Run() })
+
+	run("new-session", "-d", "-s", "quiet", "-x", "80", "-y", "24", "cat")
+	run("new-session", "-d", "-s", "busy", "-x", "80", "-y", "24", "cat")
+	run("new-window", "-t", "busy", "-n", "agent", "while true; do date; sleep 0.5; done")
+	run("select-window", "-t", "busy:^") // the noisy window is in the background
+
+	activity := func() map[string]time.Time {
+		out := map[string]time.Time{}
+		for _, rec := range discoverTmuxSessions() {
+			out[rec.Name] = rec.LastActivity
+		}
+		return out
+	}
+	before := activity()
+	if before["busy"].IsZero() || before["quiet"].IsZero() {
+		t.Fatalf("sessions not discovered: %v", before)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	after := activity()
+	if !after["busy"].After(before["busy"]) {
+		t.Errorf("busy session's activity did not advance: %v -> %v", before["busy"], after["busy"])
+	}
+	if !after["quiet"].Equal(before["quiet"]) {
+		t.Errorf("quiet session's activity moved: %v -> %v", before["quiet"], after["quiet"])
+	}
+}
