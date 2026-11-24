@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -73,7 +74,8 @@ type ScreenMeta struct {
 	Credits string `json:"credits,omitempty"` // credits the last turn used
 	Took    string `json:"took,omitempty"`    // how long the last turn took
 	Tokens  string `json:"tokens,omitempty"`  // "9.4k", while busy
-	Doing   string `json:"doing,omitempty"`   // the last tool call: "Bash(npm test)"
+	Doing   string `json:"doing,omitempty"`   // the last tool call ("Bash(npm test)") or a line of what it is writing
+	Phase   string `json:"phase,omitempty"`   // while busy: "thinking", "tool" (running Doing) or "writing" (Doing is its text)
 	Input   string `json:"input,omitempty"`   // what is typed in the input box
 }
 
@@ -184,7 +186,7 @@ func parseScreen(raw string) Screen {
 
 	boxFirst, boxLast := inputBox(rows)
 	var all []row
-	working, menuFooter, sawCredits := false, false, false
+	working, menuFooter, sawCredits, thinking := false, false, false, false
 	creditsAt := -1
 	for i, r := range rows {
 		switch {
@@ -275,6 +277,9 @@ func parseScreen(raw string) Screen {
 			if t := tokensRe.FindStringSubmatch(r.core); t != nil {
 				s.Meta.Tokens = t[1]
 			}
+			if strings.Contains(strings.ToLower(r.core), "thinking") || strings.Contains(strings.ToLower(r.core), "thought") {
+				thinking = true
+			}
 			continue
 		}
 		if s.Meta.Model == "" && strings.Contains(r.core, "·") {
@@ -285,14 +290,34 @@ func parseScreen(raw string) Screen {
 		all = append(all, r)
 	}
 
-	// what the agent is doing right now: the last tool call
+	// what the agent is doing right now: the last tool call, or the text it is writing after it
+	toolAt := -1
 	for i := len(all) - 1; i >= 0; i-- {
 		core := all[i].core
 		kiroTool := (strings.HasPrefix(core, "• ") || strings.HasPrefix(core, "↓ ")) && i+1 < len(all) && strings.HasPrefix(all[i+1].lead(), "╰")
 		if toolCallRe.MatchString(core) || kiroTool {
 			s.Meta.Doing = truncate(strings.TrimSpace(strings.TrimLeft(core, "⏺●•↓ ")), 60)
+			toolAt = i
 			break
 		}
+	}
+	prose := ""
+	for i := len(all) - 1; i > toolAt && i >= 0; i-- { // the agent's own words after its last tool call
+		core := all[i].core
+		if (strings.HasPrefix(core, "⏺ ") || strings.HasPrefix(core, "● ")) && !toolCallRe.MatchString(core) {
+			prose = truncate(strings.TrimSpace(core[len("⏺ "):]), 60)
+			break
+		}
+	}
+	switch {
+	case thinking:
+		s.Meta.Phase = "thinking"
+	case prose != "":
+		s.Meta.Phase, s.Meta.Doing = "writing", prose
+	case toolAt >= 0:
+		s.Meta.Phase = "tool"
+	default:
+		s.Meta.Phase = "thinking"
 	}
 
 	waiting := false
@@ -432,6 +457,19 @@ var (
 // CaptureScreenStyled is CaptureScreen, analysed. history > 0 also looks that many lines back into the
 // terminal's scrollback, so a reply that has scrolled off the screen can still be read in full. A result is
 // reused for captureTTL, however many clients (or polls) ask.
+var busySince = map[string]time.Time{} // when each session was first seen busy; guarded by captureMu
+
+func formatElapsed(d time.Duration) string {
+	sec := int(d.Seconds())
+	switch {
+	case sec >= 3600:
+		return fmt.Sprintf("%dh %dm", sec/3600, sec%3600/60)
+	case sec >= 60:
+		return fmt.Sprintf("%dm %ds", sec/60, sec%60)
+	}
+	return fmt.Sprintf("%ds", sec)
+}
+
 func (h *Hub) CaptureScreenStyled(name string, history int) (Screen, error) {
 	if history > maxHistory {
 		history = maxHistory
@@ -456,6 +494,19 @@ func (h *Hub) CaptureScreenStyled(name string, history int) (Screen, error) {
 
 	captureMu.Lock()
 	now := time.Now()
+	// how long it has been busy, for when the agent's own counter is not on screen (between its updates)
+	if screen.State == StateWorking {
+		since, ok := busySince[name]
+		if !ok {
+			since = now
+			busySince[name] = since
+		}
+		if screen.Elapsed == "" {
+			screen.Elapsed = formatElapsed(now.Sub(since))
+		}
+	} else {
+		delete(busySince, name)
+	}
 	for k, c := range captureCache { // forget what is old, so the cache cannot grow
 		if now.Sub(c.at) > 5*time.Second {
 			delete(captureCache, k)

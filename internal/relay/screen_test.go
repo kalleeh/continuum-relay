@@ -327,3 +327,31 @@ func TestCaptureIsCachedBriefly(t *testing.T) {
 		t.Error("another history length is another request (and is capped, not trusted)")
 	}
 }
+
+func TestWorkingPhase(t *testing.T) {
+	cases := []struct {
+		name, screen, phase, doing string
+	}{
+		{"claude thinking", "⏺ Bash(ls)\n  ⎿  a b\n\n✶ Puttering… (1m 30s · ↓ 9.4k tokens · thinking)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n",
+			"thinking", "Bash(ls)"},
+		{"claude running a tool", "⏺ Bash(npm test)\n\n✶ Puttering… (12s · ↓ 1.2k tokens)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n",
+			"tool", "Bash(npm test)"},
+		{"claude writing", "⏺ Bash(ls)\n⏺ I found two files and will now edit the first\n\n✶ Puttering… (12s · ↓ 1.2k tokens)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n",
+			"writing", "I found two files and will now edit the first"},
+		{"nothing yet", "✶ Puttering… (3s · ↓ 12 tokens)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n", "thinking", ""},
+	}
+	for _, c := range cases {
+		s := parseScreen(c.screen)
+		if s.State != StateWorking || s.Meta.Phase != c.phase || s.Meta.Doing != c.doing {
+			t.Errorf("%s: state %q phase %q doing %q", c.name, s.State, s.Meta.Phase, s.Meta.Doing)
+		}
+	}
+}
+
+func TestFormatElapsed(t *testing.T) {
+	for d, want := range map[time.Duration]string{5 * time.Second: "5s", 90 * time.Second: "1m 30s", 3700 * time.Second: "1h 1m"} {
+		if got := formatElapsed(d); got != want {
+			t.Errorf("%v: %q, want %q", d, got, want)
+		}
+	}
+}
