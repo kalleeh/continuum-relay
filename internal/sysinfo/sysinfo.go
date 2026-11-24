@@ -11,17 +11,17 @@ import (
 
 // Info holds server environment details for the iOS client.
 type Info struct {
-	OS               string   `json:"os"`               // "linux", "darwin"
-	Arch             string   `json:"arch"`             // "amd64", "arm64"
-	Hostname         string   `json:"hostname"`         // machine hostname
-	User             string   `json:"user"`             // effective username
-	Home             string   `json:"home"`             // user home directory
-	Shell            string   `json:"shell"`            // login shell path
-	ShellCommand     []string `json:"shellCommand"`     // full command to spawn a login shell
-	TmuxPath         string   `json:"tmuxPath"`         // absolute path to tmux
-	DefaultWorkDir   string   `json:"defaultWorkDir"`   // recommended working directory
-	ProjectsDir      string   `json:"projectsDir"`      // recommended projects root
-	SharedDir        string   `json:"sharedDir"`        // file-transfer shared dir (sibling of projects, never inside a repo)
+	OS             string   `json:"os"`             // "linux", "darwin"
+	Arch           string   `json:"arch"`           // "amd64", "arm64"
+	Hostname       string   `json:"hostname"`       // machine hostname
+	User           string   `json:"user"`           // effective username
+	Home           string   `json:"home"`           // user home directory
+	Shell          string   `json:"shell"`          // login shell path
+	ShellCommand   []string `json:"shellCommand"`   // full command to spawn a login shell
+	TmuxPath       string   `json:"tmuxPath"`       // absolute path to tmux
+	DefaultWorkDir string   `json:"defaultWorkDir"` // recommended working directory
+	ProjectsDir    string   `json:"projectsDir"`    // recommended projects root
+	SharedDir      string   `json:"sharedDir"`      // file-transfer shared dir (sibling of projects, never inside a repo)
 }
 
 // Detect probes the current system and returns an Info struct.

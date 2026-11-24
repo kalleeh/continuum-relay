@@ -29,7 +29,7 @@ type PeerConfig struct {
 	AllowedIPs          []string // e.g. ["10.100.0.2/32"]
 	Endpoint            string   // optional, e.g. "1.2.3.4:51820"
 	PersistentKeepalive int
-	PreSharedKey        string   // optional base64-encoded 32-byte preshared key (post-quantum layer)
+	PreSharedKey        string // optional base64-encoded 32-byte preshared key (post-quantum layer)
 }
 
 // ParseFile reads and parses a WireGuard config file.
@@ -158,7 +158,7 @@ func applyInterfaceKey(iface *InterfaceConfig, key, value string) error {
 			return fmt.Errorf("ListenPort must be 1-65535, got %d", port)
 		}
 		iface.ListenPort = port
-	// Unknown keys (DNS, MTU, PostUp, etc.) are silently ignored.
+		// Unknown keys (DNS, MTU, PostUp, etc.) are silently ignored.
 	}
 	return nil
 }
@@ -185,7 +185,7 @@ func applyPeerKey(peer *PeerConfig, key, value string) error {
 		peer.PersistentKeepalive = ka
 	case "presharedkey":
 		peer.PreSharedKey = value
-	// Unknown keys are silently ignored.
+		// Unknown keys are silently ignored.
 	}
 	return nil
 }

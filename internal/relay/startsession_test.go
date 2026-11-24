@@ -116,3 +116,19 @@ func TestStartAndEndSessionAgainstTmux(t *testing.T) {
 		t.Errorf("ending a missing cx- session: %v", err)
 	}
 }
+
+func TestHelloAnswersWithTheProtocol(t *testing.T) {
+	m := helloMessage()
+	if m["type"] != "hello" || m["protocol"] != ProtocolVersion {
+		t.Fatalf("hello = %v", m)
+	}
+	have := map[string]bool{}
+	for _, f := range ProtocolFeatures {
+		have[f] = true
+	}
+	for _, want := range []string{"start_session", "end_session", "styled_screen", "screen_history", "list_status"} {
+		if !have[want] {
+			t.Errorf("feature %q is missing", want)
+		}
+	}
+}

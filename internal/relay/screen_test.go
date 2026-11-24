@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const rule = "────────────────────────────────────────"
@@ -304,5 +305,25 @@ func TestVeryLongReplyIsCutAtItsStart(t *testing.T) {
 	}
 	if !strings.HasSuffix(s.Lines[len(s.Lines)-1], " 190") {
 		t.Errorf("the end of the reply, next to the prompt, must be what is kept")
+	}
+}
+
+// Captures are shared for a moment, so a polling client costs one tmux process per interval, not one per request.
+func TestCaptureIsCachedBriefly(t *testing.T) {
+	captureMu.Lock()
+	captureCache = map[string]capturedScreen{
+		"cached|0": {at: time.Now(), screen: Screen{State: StateDone}},
+		"stale|0":  {at: time.Now().Add(-time.Second), screen: Screen{State: StateDone}},
+	}
+	captureMu.Unlock()
+	h := NewHub(nil)
+	if s, err := h.CaptureScreenStyled("cached", 0); err != nil || s.State != StateDone {
+		t.Errorf("a fresh result should be reused without touching tmux: %v %v", s, err)
+	}
+	if _, err := h.CaptureScreenStyled("stale", 0); err == nil {
+		t.Error("a stale result must be captured again (there is no such session, so it errors)")
+	}
+	if _, err := h.CaptureScreenStyled("cached", 5000); err == nil {
+		t.Error("another history length is another request (and is capped, not trusted)")
 	}
 }

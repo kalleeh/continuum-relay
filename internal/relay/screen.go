@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 )
 
@@ -85,6 +87,7 @@ type Screen struct {
 
 var (
 	elapsedRe      = regexp.MustCompile(`\b(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b`)
+	spinnerTimeRe  = regexp.MustCompile(`\(((?:\d+h\s*)?(?:\d+m\s*)?\d+s)\b`) // "(1m 30s · ↓ 9.4k tokens)", not "retrying in 5s"
 	tokensRe       = regexp.MustCompile(`[↓↑]\s*([\d.]+k?)\s*tokens`)
 	numberedRe     = regexp.MustCompile(`^❯\s*\d{1,2}[.)]\s+\S`)
 	cursorRe       = regexp.MustCompile(`^❯\s+\S`)
@@ -100,7 +103,11 @@ var (
 	spinnerLineRe  = regexp.MustCompile(`^[✻✶✳✢✽·*●◐◓◑◒⠀-⣿ᗤ]\s+\S`)
 )
 
-const kiroPlaceholder = "ask a question or describe a task"
+// kiroPlaceholder is what Kiro's prompt shows when nothing is typed; the other placeholder says it is still starting up.
+const (
+	kiroPlaceholder = "ask a question or describe a task"
+	kiroStarting    = "Initializing"
+)
 
 // menuFooters are the key hints under a menu or dialog; they are the surest sign that it wants an answer.
 var menuFooters = []string{"esc to close", "to navigate", "enter to confirm", "to select"}
@@ -210,7 +217,10 @@ func parseScreen(raw string) Screen {
 		}
 		if strings.HasPrefix(r.plain, "›") { // Kiro's prompt, at the left edge (a message sent earlier is indented)
 			input := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(r.plain, "›")), "↵"))
-			if input != kiroPlaceholder {
+			switch {
+			case strings.HasPrefix(input, kiroStarting): // "Initializing · type to queue a message": not ready yet
+				working = true
+			case input != kiroPlaceholder:
 				s.Meta.Input = input
 			}
 			continue
@@ -259,8 +269,8 @@ func parseScreen(raw string) Screen {
 		if spinnerLineRe.MatchString(r.core) && (strings.Contains(r.core, "…") || strings.Contains(r.core, "...") ||
 			strings.Contains(r.core, "to interrupt") || elapsedRe.MatchString(r.core)) {
 			working = true
-			if e := elapsedRe.FindString(r.core); e != "" && s.Elapsed == "" {
-				s.Elapsed = strings.TrimSpace(e)
+			if m := spinnerTimeRe.FindStringSubmatch(r.core); m != nil && s.Elapsed == "" {
+				s.Elapsed = strings.TrimSpace(m[1])
 			}
 			if t := tokensRe.FindStringSubmatch(r.core); t != nil {
 				s.Meta.Tokens = t[1]
@@ -405,19 +415,53 @@ func reply(all []row, sawCredits bool, creditsAt int) ([]row, string) {
 	return tail(), StateIdle
 }
 
+// captureTTL is how long a capture is reused: the desk device asks twice a second while its terminal view is open,
+// and a capture costs a tmux process, so identical requests close together share one.
+const captureTTL = 300 * time.Millisecond
+
+type capturedScreen struct {
+	at     time.Time
+	screen Screen
+}
+
+var (
+	captureMu    sync.Mutex
+	captureCache = map[string]capturedScreen{}
+)
+
 // CaptureScreenStyled is CaptureScreen, analysed. history > 0 also looks that many lines back into the
-// terminal's scrollback, so a reply that has scrolled off the screen can still be read in full.
+// terminal's scrollback, so a reply that has scrolled off the screen can still be read in full. A result is
+// reused for captureTTL, however many clients (or polls) ask.
 func (h *Hub) CaptureScreenStyled(name string, history int) (Screen, error) {
+	if history > maxHistory {
+		history = maxHistory
+	}
+	key := name + "|" + strconv.Itoa(history)
+	captureMu.Lock()
+	if c, ok := captureCache[key]; ok && time.Since(c.at) < captureTTL {
+		captureMu.Unlock()
+		return c.screen, nil
+	}
+	captureMu.Unlock()
+
 	args := []string{"capture-pane", "-e", "-p"}
 	if history > 0 {
-		if history > maxHistory {
-			history = maxHistory
-		}
 		args = append(args, "-S", "-"+strconv.Itoa(history))
 	}
 	out, err := h.runOnSession(name, append(args, "-t", "{target}")...)
 	if err != nil {
 		return Screen{}, err
 	}
-	return parseScreen(string(out)), nil
+	screen := parseScreen(string(out))
+
+	captureMu.Lock()
+	now := time.Now()
+	for k, c := range captureCache { // forget what is old, so the cache cannot grow
+		if now.Sub(c.at) > 5*time.Second {
+			delete(captureCache, k)
+		}
+	}
+	captureCache[key] = capturedScreen{at: now, screen: screen}
+	captureMu.Unlock()
+	return screen, nil
 }

@@ -1,0 +1,24 @@
+         [38;5;182m⠙[38;5;188m⠛[38;5;182m⠛[38;5;145m⠛[38;5;103m⠋⠁[38;5;182m⠙⠛[38;5;145m⠛[38;5;103m⠉[39m
+
+
+[95m▸[39m [1mWhat's new[0m
+  Approve for me, cloud sessions, memory, local sandbox and specs.
+────────────────────────────────────────────────────────────────────────────────
+  ›
+  Use the shell tool to run exactly: sleep 9 && echo fixture-done. Then say done
+  in one short sentence.
+
+[32m•[39m Shell[94m sleep 9 && echo fixture-done[39m
+    ╰ description=Run sleep then echo, run_in_background=false
+    ╰ [38;5;151mfixture-done[39m
+
+[38;5;219m•[39m Done: the command ran and printed "fixture-done".
+
+▸ Credits: turn 0.14 • session 0.14 | Time: 15s
+
+────────────────────────────────────────────────────────────────────────────────
+[95mDefault[39m · auto · [32m◔[39m [32m3%[39m                                                          [95m/
+
+[39m›  ask a question or describe a task ↵
+
+

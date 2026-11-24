@@ -106,6 +106,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		}
 
 		switch msg.Type {
+		case "hello":
+			writeJSON(ctx, conn, helloMessage())
+
 		case "list_sessions":
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
 			// A client that asks ("status": true; the desk device does) also gets each session's
