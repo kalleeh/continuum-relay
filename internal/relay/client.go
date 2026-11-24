@@ -48,6 +48,8 @@ type ClientMessage struct {
 	History       int    `json:"history,omitempty"`         // capture_screen (styled): also read this many lines of scrollback
 	Styled        bool   `json:"styled,omitempty"`          // capture_screen: keep colours, drop the input box frame, add "activity"
 	Skip          bool   `json:"skipPermissions,omitempty"` // start_session: run the agent without asking before tools
+	Rate          int    `json:"rate,omitempty"`            // audio_begin: samples per second of the 16-bit mono audio that follows
+	Data          string `json:"data,omitempty"`            // audio_chunk: base64 of some of that audio
 }
 
 func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
@@ -93,6 +95,8 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		}
 	}()
 
+	var inbox audioInbox // the recording this client is sending, if any
+
 	// Main loop: read client messages
 	for {
 		_, raw, err := conn.Read(ctx)
@@ -108,6 +112,9 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		switch msg.Type {
 		case "hello":
 			writeJSON(ctx, conn, helloMessage())
+
+		case "audio_begin", "audio_chunk", "audio_end":
+			handleAudio(ctx, conn, &inbox, msg)
 
 		case "list_sessions":
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())

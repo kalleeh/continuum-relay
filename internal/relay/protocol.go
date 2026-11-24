@@ -6,7 +6,7 @@ package relay
 //
 //	1  the original messages
 //	2  start_session / end_session, send_key / send_text / capture_screen, styled screens with scrollback,
-//	   list_sessions status snapshots on request
+//	   list_sessions status snapshots on request; optionally (feature "transcribe") speech to text from audio_* messages
 const ProtocolVersion = 2
 
 // ProtocolFeatures names what this relay can do, one string per capability, for clients that care about one
@@ -23,5 +23,9 @@ var ProtocolFeatures = []string{
 }
 
 func helloMessage() map[string]any {
-	return map[string]any{"type": "hello", "protocol": ProtocolVersion, "features": ProtocolFeatures}
+	features := append([]string(nil), ProtocolFeatures...)
+	if CurrentTranscriber() != nil {
+		features = append(features, "transcribe") // audio_begin / audio_chunk / audio_end -> transcript
+	}
+	return map[string]any{"type": "hello", "protocol": ProtocolVersion, "features": features}
 }
