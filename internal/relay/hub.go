@@ -144,6 +144,9 @@ func mergeDiscovered(relayRecords, discovered []SessionRecord) []SessionRecord {
 // skipped here instead of surfacing an entry the app can never open.
 var discoverableNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+// outputActivity makes a session count as active when its panes print, not only when a client types.
+var outputActivity = os.Getenv("CONTINUUM_OUTPUT_ACTIVITY") == "1"
+
 // tmuxDiscoveryCommand builds the `tmux list-sessions` invocation used for
 // discovery. Crucially it must reach the *user's* tmux server.
 //
@@ -215,7 +218,13 @@ func discoverTmuxSessions() []SessionRecord {
 	// idle. Output advances #{window_activity}, per window; the #{W:} loop lists
 	// every window's so a busy agent in a background window still counts. The
 	// field is a space-separated list and the newest timestamp wins.
-	const format = "#{session_name}\t#{session_activity} #{W:#{window_activity} }\t#{session_attached}"
+	// Off by default, so what every client sees is unchanged: the iOS app's working/idle state and its
+	// Live Activity pushes still follow #{session_activity} alone. CONTINUUM_OUTPUT_ACTIVITY=1 turns the
+	// output-based signal on.
+	format := "#{session_name}\t#{session_activity}\t#{session_attached}"
+	if outputActivity {
+		format = "#{session_name}\t#{session_activity} #{W:#{window_activity} }\t#{session_attached}"
+	}
 	cmd := tmuxDiscoveryCommand(ctx, format)
 	out, err := cmd.Output()
 	if err != nil {

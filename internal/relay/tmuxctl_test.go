@@ -194,6 +194,8 @@ func TestDiscoveryActivityFollowsPaneOutput(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
+	outputActivity = true // opt-in (CONTINUUM_OUTPUT_ACTIVITY=1)
+	t.Cleanup(func() { outputActivity = false })
 	sockDir, err := os.MkdirTemp("/tmp", "cxt")
 	if err != nil {
 		t.Fatal(err)
@@ -233,5 +235,47 @@ func TestDiscoveryActivityFollowsPaneOutput(t *testing.T) {
 	}
 	if !after["quiet"].Equal(before["quiet"]) {
 		t.Errorf("quiet session's activity moved: %v -> %v", before["quiet"], after["quiet"])
+	}
+}
+
+// By default nothing changes for existing clients: activity follows the session's own timestamp, so output
+// in a background window does not make the session look busy.
+func TestDiscoveryActivityDefaultIgnoresPaneOutput(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	if outputActivity {
+		t.Skip("CONTINUUM_OUTPUT_ACTIVITY is set")
+	}
+	sockDir, err := os.MkdirTemp("/tmp", "cxt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	t.Setenv("TMUX_TMPDIR", sockDir)
+	t.Setenv("TMUX", "")
+	ctx := context.Background()
+	t.Cleanup(func() { _ = tmuxCommand(ctx, "kill-server").Run() })
+	for _, args := range [][]string{
+		{"new-session", "-d", "-s", "busy", "-x", "80", "-y", "24", "cat"},
+		{"new-window", "-t", "busy", "-n", "agent", "while true; do date; sleep 0.5; done"},
+		{"select-window", "-t", "busy:^"},
+	} {
+		if out, err := tmuxCommand(ctx, args...).CombinedOutput(); err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, out)
+		}
+	}
+	find := func() time.Time {
+		for _, rec := range discoverTmuxSessions() {
+			if rec.Name == "busy" {
+				return rec.LastActivity
+			}
+		}
+		return time.Time{}
+	}
+	before := find()
+	time.Sleep(2500 * time.Millisecond)
+	if after := find(); !after.Equal(before) {
+		t.Errorf("without the opt-in, pane output must not move a session's activity: %v -> %v", before, after)
 	}
 }

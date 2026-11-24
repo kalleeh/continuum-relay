@@ -33,15 +33,21 @@ type ClientMessage struct {
 	Session       string `json:"session,omitempty"`
 	GitHubToken   string `json:"githubToken,omitempty"`
 	Slug          string `json:"slug,omitempty"`
-	ID            string `json:"id,omitempty"`             // tool_permission_response
-	Allow         bool   `json:"allow,omitempty"`          // tool_permission_response
-	Token         string `json:"token,omitempty"`          // rotate_token
-	DeviceToken   string `json:"device_token,omitempty"`   // register_device
-	ActivityToken string `json:"activity_token,omitempty"` // register_activity (Live Activity push token)
-	Force         bool   `json:"force,omitempty"`          // remove_project: delete even with unsaved work
-	Key           string `json:"key,omitempty"`            // send_key: up | down | enter | escape | one of a-z0-9
-	Lines         int    `json:"lines,omitempty"`          // capture_screen: how many trailing lines
-	Text          string `json:"text,omitempty"`           // send_text: typed into the session, no Enter
+	ID            string `json:"id,omitempty"`              // tool_permission_response
+	Allow         bool   `json:"allow,omitempty"`           // tool_permission_response
+	Token         string `json:"token,omitempty"`           // rotate_token
+	DeviceToken   string `json:"device_token,omitempty"`    // register_device
+	ActivityToken string `json:"activity_token,omitempty"`  // register_activity (Live Activity push token)
+	Force         bool   `json:"force,omitempty"`           // remove_project: delete even with unsaved work
+	Key           string `json:"key,omitempty"`             // send_key: up | down | enter | escape | one of a-z0-9
+	Lines         int    `json:"lines,omitempty"`           // capture_screen: how many trailing lines
+	Text          string `json:"text,omitempty"`            // send_text: typed into the session, no Enter
+	Agent         string `json:"agent,omitempty"`           // start_session: claude | kiro | terminal
+	Project       string `json:"project,omitempty"`         // start_session: one of the names list_projects returns
+	Status        bool   `json:"status,omitempty"`          // list_sessions: also send each session's working/idle state
+	History       int    `json:"history,omitempty"`         // capture_screen (styled): also read this many lines of scrollback
+	Styled        bool   `json:"styled,omitempty"`          // capture_screen: keep colours, drop the input box frame, add "activity"
+	Skip          bool   `json:"skipPermissions,omitempty"` // start_session: run the agent without asking before tools
 }
 
 func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authenticator *auth.Authenticator, clientID string) {
@@ -102,10 +108,13 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 		switch msg.Type {
 		case "list_sessions":
 			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
-			// Follow the list with each session's current working/idle state:
-			// status is otherwise only pushed when it changes.
-			for _, status := range hub.StatusSnapshot() {
-				_ = conn.Write(ctx, websocket.MessageText, status)
+			// A client that asks ("status": true; the desk device does) also gets each session's
+			// current working/idle state, which is otherwise only pushed when it changes. Other
+			// clients get exactly what they always did.
+			if msg.Status {
+				for _, status := range hub.StatusSnapshot() {
+					_ = conn.Write(ctx, websocket.MessageText, status)
+				}
 			}
 
 		case "create_session":
@@ -218,6 +227,29 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			}
 			writeJSON(ctx, conn, map[string]string{"type": "project_removed", "name": msg.Name})
 
+		case "start_session":
+			cwd := ""
+			if msg.Project != "" {
+				path, err := projectPath(msg.Project)
+				if err != nil {
+					writeError(ctx, conn, "start_failed", err.Error())
+					continue
+				}
+				cwd = path
+			}
+			if err := hub.StartSession(msg.Name, cwd, msg.Agent, msg.Skip); err != nil {
+				writeError(ctx, conn, "start_failed", err.Error())
+				continue
+			}
+			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
+
+		case "end_session":
+			if err := hub.EndSession(msg.Name); err != nil {
+				writeError(ctx, conn, "end_failed", err.Error())
+				continue
+			}
+			_ = conn.Write(ctx, websocket.MessageText, hub.SessionListJSON())
+
 		case "send_key":
 			if err := hub.SendKey(msg.Session, msg.Key); err != nil {
 				writeError(ctx, conn, "send_key_failed", err.Error())
@@ -229,6 +261,16 @@ func HandleClient(ctx context.Context, conn *websocket.Conn, hub *Hub, authentic
 			}
 
 		case "capture_screen":
+			if msg.Styled {
+				screen, err := hub.CaptureScreenStyled(msg.Session, msg.History)
+				if err != nil {
+					writeError(ctx, conn, "capture_failed", err.Error())
+					continue
+				}
+				writeJSON(ctx, conn, map[string]any{"type": "screen", "session": msg.Session, "lines": screen.Lines,
+					"state": screen.State, "elapsed": screen.Elapsed, "meta": screen.Meta})
+				continue
+			}
 			lines, err := hub.CaptureScreen(msg.Session, msg.Lines)
 			if err != nil {
 				writeError(ctx, conn, "capture_failed", err.Error())
@@ -307,4 +349,19 @@ func writeError(ctx context.Context, conn *websocket.Conn, code, message string)
 func writeJSON(ctx context.Context, conn *websocket.Conn, v any) {
 	data, _ := json.Marshal(v)
 	_ = conn.Write(ctx, websocket.MessageText, data)
+}
+
+// projectPath resolves a project name from list_projects to its folder. Only names the relay itself
+// lists are accepted, so a client cannot point a session at an arbitrary directory.
+func projectPath(name string) (string, error) {
+	records, err := projects.ListProjects()
+	if err != nil {
+		return "", err
+	}
+	for _, r := range records {
+		if r.Name == name {
+			return r.Path, nil
+		}
+	}
+	return "", errors.New("unknown project")
 }
