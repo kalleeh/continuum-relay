@@ -65,18 +65,19 @@ const (
 // ScreenMeta is what the agent's chrome says. Empty fields are left out; Context is a percentage of
 // the context window used, or -1 when the screen does not say.
 type ScreenMeta struct {
-	Agent   string `json:"agent,omitempty"`   // Kiro's agent profile, e.g. "Default"
-	Mode    string `json:"mode,omitempty"`    // "auto", "auto mode on", "accept edits on", ...
-	Model   string `json:"model,omitempty"`   // "Opus 4.8"
-	Context int    `json:"context"`           // percent used; -1 unknown
-	CWD     string `json:"cwd,omitempty"`     // working folder
-	Branch  string `json:"branch,omitempty"`  // git branch
-	Credits string `json:"credits,omitempty"` // credits the last turn used
-	Took    string `json:"took,omitempty"`    // how long the last turn took
-	Tokens  string `json:"tokens,omitempty"`  // "9.4k", while busy
-	Doing   string `json:"doing,omitempty"`   // the last tool call ("Bash(npm test)") or a line of what it is writing
-	Phase   string `json:"phase,omitempty"`   // while busy: "thinking", "tool" (running Doing) or "writing" (Doing is its text)
-	Input   string `json:"input,omitempty"`   // what is typed in the input box
+	Agent   string   `json:"agent,omitempty"`   // Kiro's agent profile, e.g. "Default"
+	Mode    string   `json:"mode,omitempty"`    // "auto", "auto mode on", "accept edits on", ...
+	Model   string   `json:"model,omitempty"`   // "Opus 4.8"
+	Context int      `json:"context"`           // percent used; -1 unknown
+	CWD     string   `json:"cwd,omitempty"`     // working folder
+	Branch  string   `json:"branch,omitempty"`  // git branch
+	Credits string   `json:"credits,omitempty"` // credits the last turn used
+	Took    string   `json:"took,omitempty"`    // how long the last turn took
+	Tokens  string   `json:"tokens,omitempty"`  // "9.4k", while busy
+	Doing   string   `json:"doing,omitempty"`   // the last tool call ("Bash(npm test)") or a line of what it is writing
+	Recent  []string `json:"recent,omitempty"`  // the last few things it did, oldest first: "T|Bash(npm test)" a tool call, "W|..." its own words
+	Phase   string   `json:"phase,omitempty"`   // while busy: "thinking", "tool" (running Doing) or "writing" (Doing is its text)
+	Input   string   `json:"input,omitempty"`   // what is typed in the input box
 }
 
 // Screen is the analysed screen.
@@ -300,6 +301,20 @@ func parseScreen(raw string) Screen {
 			toolAt = i
 			break
 		}
+	}
+	// the last few things it did, for a view that shows progress without being the whole log
+	for i := len(all) - 1; i >= 0 && len(s.Meta.Recent) < 4; i-- {
+		core := all[i].core
+		kiroTool := (strings.HasPrefix(core, "• ") || strings.HasPrefix(core, "↓ ")) && i+1 < len(all) && strings.HasPrefix(all[i+1].lead(), "╰")
+		switch {
+		case toolCallRe.MatchString(core) || kiroTool:
+			s.Meta.Recent = append(s.Meta.Recent, "T|"+truncate(strings.TrimSpace(strings.TrimLeft(core, "⏺●•↓ ")), 48))
+		case strings.HasPrefix(core, "⏺ ") || strings.HasPrefix(core, "● "):
+			s.Meta.Recent = append(s.Meta.Recent, "W|"+truncate(strings.TrimSpace(core[len("⏺ "):]), 48))
+		}
+	}
+	for l, r := 0, len(s.Meta.Recent)-1; l < r; l, r = l+1, r-1 { // oldest first
+		s.Meta.Recent[l], s.Meta.Recent[r] = s.Meta.Recent[r], s.Meta.Recent[l]
 	}
 	prose := ""
 	for i := len(all) - 1; i > toolAt && i >= 0; i-- { // the agent's own words after its last tool call

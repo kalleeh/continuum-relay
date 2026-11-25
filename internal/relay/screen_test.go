@@ -340,6 +340,11 @@ func TestWorkingPhase(t *testing.T) {
 			"writing", "I found two files and will now edit the first"},
 		{"nothing yet", "✶ Puttering… (3s · ↓ 12 tokens)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n", "thinking", ""},
 	}
+	// the last few things it did come with it, oldest first
+	long := parseScreen("⏺ Read(a.go)\n⏺ Update(a.go)\n⏺ I will run the tests now\n⏺ Bash(go test)\n\n✶ Puttering… (12s · ↓ 1.2k tokens)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt\n")
+	if got := strings.Join(long.Meta.Recent, ","); got != "T|Read(a.go),T|Update(a.go),W|I will run the tests now,T|Bash(go test)" {
+		t.Errorf("recent: %q", got)
+	}
 	for _, c := range cases {
 		s := parseScreen(c.screen)
 		if s.State != StateWorking || s.Meta.Phase != c.phase || s.Meta.Doing != c.doing {
