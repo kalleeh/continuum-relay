@@ -33,6 +33,10 @@ const (
 	maxAudioBytes   = maxAudioSeconds * 16000 * 2
 )
 
+// Only a couple of recordings are turned into text at once: whisper uses every core it is given, and a client that sent
+// recordings faster than they can be handled would otherwise start a process for each.
+var transcribeSlots = make(chan struct{}, 2)
+
 type Transcriber struct {
 	Bin, Model, Lang string
 	Threads          int
@@ -169,6 +173,13 @@ func handleAudio(ctx context.Context, conn *websocket.Conn, inbox *audioInbox, m
 		go func() {
 			if len(pcm) < rate*2*3/10 { // under 0.3 s: a slip of the finger, not speech
 				writeJSON(ctx, conn, map[string]string{"type": "transcript", "id": id, "text": ""})
+				return
+			}
+			select {
+			case transcribeSlots <- struct{}{}:
+				defer func() { <-transcribeSlots }()
+			default:
+				writeError(ctx, conn, "transcribe_busy", "the relay is already transcribing")
 				return
 			}
 			text, err := t.Transcribe(ctx, pcm, rate)
