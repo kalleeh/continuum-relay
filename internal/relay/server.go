@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,10 +18,19 @@ import (
 	"github.com/continuum-app/continuum-relay/internal/apns"
 	"github.com/continuum-app/continuum-relay/internal/auth"
 	"github.com/continuum-app/continuum-relay/internal/files"
+	"github.com/continuum-app/continuum-relay/internal/firmware"
 	"github.com/continuum-app/continuum-relay/internal/peers"
 	"github.com/continuum-app/continuum-relay/internal/sysinfo"
 	"github.com/continuum-app/continuum-relay/internal/webproxy"
 )
+
+// firmwareDir is where new firmware for the desk device is put (CONTINUUM_FIRMWARE_DIR).
+func firmwareDir() string {
+	if d := os.Getenv("CONTINUUM_FIRMWARE_DIR"); d != "" {
+		return d
+	}
+	return "/var/lib/continuum/firmware"
+}
 
 func newClientID() string {
 	b := make([]byte, 8)
@@ -80,6 +90,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Authenticated reverse proxy to local dev servers (the in-app browser).
 	// /proxy/{port}/{path} → http://127.0.0.1:{port}/{path}, bearer-authed.
 	mux.HandleFunc("/proxy/", s.authed(webproxy.Handler()))
+	mux.HandleFunc("/firmware/", s.authed(firmware.Handler(firmwareDir())))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
